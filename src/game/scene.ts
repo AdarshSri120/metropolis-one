@@ -1,9 +1,11 @@
 import * as THREE from "three";
 import { City, H, TILE, W, WATER_X, hash, type MapLayer, type ToolId, type Track } from "./city";
+import { buildingAt, buildingById, chunkIndex, footprint, structureParts } from "./buildings";
+import { CHUNK_CAP, ChunkField, emptyBucket } from "./chunks";
 import { HEX, shade } from "./colors";
 import type { CityView, Gfx } from "./view";
 
-const CAP = 14000;
+const CAP = CHUNK_CAP;
 
 interface Part {
   x: number;
@@ -37,11 +39,7 @@ export class CityScene implements CityView {
   private skyNight = new THREE.Color(0x070b14);
   private sun: THREE.DirectionalLight;
   private hemi: THREE.HemisphereLight;
-  private boxes: THREE.InstancedMesh;
-  private cyls: THREE.InstancedMesh;
-  private cones: THREE.InstancedMesh;
-  private wins: THREE.InstancedMesh;
-  private lamps: THREE.InstancedMesh;
+  private field: ChunkField;
   private winMat: THREE.MeshStandardMaterial;
   private lampMat: THREE.MeshStandardMaterial;
   private water: THREE.Mesh;
@@ -139,11 +137,6 @@ export class CityScene implements CityView {
 
     const solid = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.78, metalness: 0.04 });
     const geoB = new THREE.BoxGeometry(1, 1, 1);
-    const geoC = new THREE.CylinderGeometry(0.5, 0.5, 1, 8);
-    const geoK = new THREE.ConeGeometry(0.5, 1, 6);
-    this.boxes = mesh(geoB, solid, !lite);
-    this.cyls = mesh(geoC, solid, !lite);
-    this.cones = mesh(geoK, solid, false);
     this.winMat = new THREE.MeshStandardMaterial({
       color: 0x1a120c,
       emissive: HEX.window,
@@ -158,9 +151,7 @@ export class CityScene implements CityView {
       emissiveIntensity: 0,
       roughness: 0.4,
     });
-    this.wins = mesh(geoB, this.winMat, false);
-    this.lamps = mesh(new THREE.SphereGeometry(0.5, 8, 6), this.lampMat, false);
-    this.scene.add(this.boxes, this.cyls, this.cones, this.wins, this.lamps);
+    this.field = new ChunkField(this.scene, solid, this.winMat, this.lampMat, !lite);
 
     this.ghost = new THREE.Mesh(
       geoB,
@@ -249,16 +240,19 @@ export class CityScene implements CityView {
   }
 
   sync() {
-    const box: Part[] = [];
-    const cyl: Part[] = [];
-    const cone: Part[] = [];
-    const win: Part[] = [];
-    const lamp: Part[] = [];
+    const started = performance.now();
+    const dirty = new Set(this.city.pullVisualDirty());
+    const buckets = [emptyBucket(), emptyBucket(), emptyBucket(), emptyBucket()];
     this.hasAirport = false;
     this.hasBoat = false;
     const city = this.city;
 
     let liftY = 0;
+    let box = buckets[0].box;
+    let cyl = buckets[0].cyl;
+    let cone = buckets[0].cone;
+    let win = buckets[0].win;
+    let lamp = buckets[0].lamp;
     const add = (list: Part[], x: number, z: number, sx: number, sy: number, sz: number, y: number, c: number, ry = 0) => {
       if (list.length >= CAP || sy <= 0) return;
       list.push({ x, y: y + liftY, z, sx, sy, sz, ry, c });
@@ -266,6 +260,14 @@ export class CityScene implements CityView {
 
     for (let z = 0; z < H; z++) {
       for (let x = 0; x < W; x++) {
+        const ci = chunkIndex(x, z);
+        if (!dirty.has(ci)) continue;
+        const bucket = buckets[ci];
+        box = bucket.box;
+        cyl = bucket.cyl;
+        cone = bucket.cone;
+        win = bucket.win;
+        lamp = bucket.lamp;
         const t = city.tile(x, z);
         liftY = (t.elev || 0) * 0.42;
         const X = wx(x);
@@ -333,7 +335,9 @@ export class CityScene implements CityView {
           add(box, X, Z, 3.85, 0.08, 3.85, 0.04, HEX.runway);
           add(box, X, Z, 0.28, 0.03, 1.8, 0.12, HEX.runwayMark);
         }
-        if (t.zone !== "none" && t.plop === "none") {
+        if (t.bid && t.bax === x && t.baz === z) {
+          paintStructure(add, box, cyl, cone, win, x, z, t.brot, t.bid, t.bseed, t.bstage, t.powered);
+        } else if (!t.bid && t.zone !== "none" && t.plop === "none") {
           if (t.level <= 0) {
             const lot = t.zone === "r" ? HEX.lotR : t.zone === "c" ? HEX.lotC : t.zone === "i" ? HEX.lotI : HEX.lotO;
             add(box, X, Z, 3.35, 0.06, 3.35, 0.03, t.served ? lot : shade(lot, 0.65));
@@ -341,17 +345,17 @@ export class CityScene implements CityView {
             growBuilding(add, box, cyl, win, X, Z, x, z, t.zone, t.level, t.powered);
           }
         }
-        if (t.plop !== "none") plop(add, box, cyl, cone, X, Z, x, z, t.plop, t.powered);
+        if (!t.bid && t.plop !== "none") plop(add, box, cyl, cone, X, Z, x, z, t.plop, t.powered);
         if (t.plop === "airport") this.hasAirport = true;
         if (t.plop === "port" || t.plop === "marina" || t.plop === "ferry") this.hasBoat = true;
       }
     }
 
-    write(this.boxes, box, this.dummy, this.color);
-    write(this.cyls, cyl, this.dummy, this.color);
-    write(this.cones, cone, this.dummy, this.color);
-    write(this.wins, win, this.dummy, this.color);
-    write(this.lamps, lamp, this.dummy, this.color);
+    for (let i = 0; i < buckets.length; i++) {
+      if (!dirty.has(i)) continue;
+      this.field.write(i, buckets[i], this.dummy, this.color);
+    }
+    this.city.lastDrawMs = performance.now() - started;
   }
 
   frame(dt: number) {
@@ -380,6 +384,18 @@ export class CityScene implements CityView {
     this.ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     this.ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     this.ray.setFromCamera(this.ndc, this.camera);
+    const origin = this.ray.ray.origin;
+    const dir = this.ray.ray.direction;
+    for (let t = 2; t < 560; t += 0.8) {
+      const px = origin.x + dir.x * t;
+      const py = origin.y + dir.y * t;
+      const pz = origin.z + dir.z * t;
+      const x = Math.floor(px / TILE + W / 2);
+      const z = Math.floor(pz / TILE + H / 2);
+      if (x < 0 || z < 0 || x >= W || z >= H) continue;
+      const h = (this.city.tile(x, z).elev || 0) * 0.42;
+      if (py <= h + 0.45) return { x, z };
+    }
     const hit = this.ray.intersectObject(this.pickPlane)[0];
     if (!hit) return null;
     const x = Math.floor(hit.point.x / TILE + W / 2);
@@ -389,6 +405,22 @@ export class CityScene implements CityView {
   }
 
   setGhost(x: number, z: number, tool: ToolId | null) {
+    const id = this.city.catalogId;
+    if (id && x >= 0 && z >= 0) {
+      const spec = buildingById(id);
+      if (!spec) {
+        this.ghost.visible = false;
+        return;
+      }
+      const fp = footprint(spec, x, z, this.city.catalogRot);
+      const bad = this.city.buildingError(x, z, id, this.city.catalogRot);
+      this.ghost.visible = true;
+      this.ghost.scale.set(fp.w * TILE * 0.92, 0.45, fp.d * TILE * 0.92);
+      this.ghost.position.set(wx(x) + ((fp.w - 1) * TILE) / 2, 0.28 + (this.city.tile(x, z).elev || 0) * 0.42, wz(z) + ((fp.d - 1) * TILE) / 2);
+      (this.ghost.material as THREE.MeshStandardMaterial).color.setHex(bad ? 0xef8b78 : 0x6eecc8);
+      return;
+    }
+    this.ghost.scale.set(TILE * 0.92, 0.35, TILE * 0.92);
     if (x < 0 || z < 0 || !tool || tool === "inspect") {
       this.ghost.visible = false;
       return;
@@ -609,31 +641,34 @@ export class CityScene implements CityView {
   }
 }
 
-function mesh(geo: THREE.BufferGeometry, mat: THREE.Material, shadow: boolean) {
-  const m = new THREE.InstancedMesh(geo, mat, CAP);
-  m.count = 0;
-  m.frustumCulled = false;
-  m.castShadow = shadow;
-  m.receiveShadow = shadow;
-  m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(CAP * 3), 3);
-  return m;
-}
-
-function write(mesh: THREE.InstancedMesh, parts: Part[], dummy: THREE.Object3D, color: THREE.Color) {
-  const n = Math.min(parts.length, CAP);
-  mesh.count = n;
-  for (let i = 0; i < n; i++) {
-    const p = parts[i];
-    dummy.position.set(p.x, p.y + p.sy * 0.5, p.z);
-    dummy.scale.set(p.sx, p.sy, p.sz);
-    dummy.rotation.set(0, p.ry, 0);
-    dummy.updateMatrix();
-    mesh.setMatrixAt(i, dummy.matrix);
-    color.setHex(p.c);
-    mesh.setColorAt(i, color);
+function paintStructure(
+  add: Add,
+  box: Part[],
+  cyl: Part[],
+  cone: Part[],
+  win: Part[],
+  x: number,
+  z: number,
+  rot: number,
+  bid: number,
+  seed: number,
+  stage: number,
+  powered: boolean,
+) {
+  const def = buildingAt(bid);
+  if (!def) return;
+  const fp = footprint(def, x, z, rot);
+  const cx = wx(x) + ((fp.w - 1) * TILE) / 2;
+  const cz = wz(z) + ((fp.d - 1) * TILE) / 2;
+  const ry = rot * (Math.PI / 2);
+  const cos = Math.cos(ry);
+  const sin = Math.sin(ry);
+  for (const p of structureParts(def, seed, stage, powered && stage !== 6)) {
+    const X = cx + p.x * cos + p.z * sin;
+    const Z = cz - p.x * sin + p.z * cos;
+    const list = p.k === "win" ? win : p.k === "cyl" ? cyl : p.k === "cone" ? cone : box;
+    add(list, X, Z, p.sx, p.sy, p.sz, p.y, p.c, p.ry + ry);
   }
-  mesh.instanceMatrix.needsUpdate = true;
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 }
 
 function roadAt(city: City, x: number, z: number) {

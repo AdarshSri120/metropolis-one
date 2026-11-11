@@ -1,4 +1,5 @@
 import { City, H, W, hash, type Plop, type ToolId, type Tile, type Zone } from "./city";
+import { buildingAt, buildingById, footprint } from "./buildings";
 import { HEX, cssHex, shade } from "./colors";
 import type { CityView } from "./view";
 
@@ -204,6 +205,16 @@ export class FlatCity implements CityView {
       ctx.lineWidth = 2;
       ctx.strokeRect(ox + g.x * s + 1, oy + g.z * s + 1, s - 2, s - 2);
     }
+    if (city.catalogId && g.x >= 0 && g.z >= 0) {
+      const def = buildingById(city.catalogId);
+      if (def) {
+        const fp = footprint(def, g.x, g.z, city.catalogRot);
+        const bad = city.buildingError(g.x, g.z, city.catalogId, city.catalogRot);
+        ctx.strokeStyle = bad ? "#ef8b78" : "#6eecc8";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(ox + g.x * s + 1, oy + g.z * s + 1, fp.w * s - 2, fp.d * s - 2);
+      }
+    }
     const sel = city.selected;
     if (sel) {
       ctx.strokeStyle = "#e7f1f4";
@@ -301,10 +312,39 @@ function ghostTile(tool: ToolId): Tile {
     junction: 0,
     gauge: 0,
     basin: 0,
+    bid: 0,
+    brot: 0,
+    bseed: 0,
+    bstage: 0,
+    bax: -1,
+    baz: -1,
   };
 }
 
 function drawStructure(ctx: CanvasRenderingContext2D, t: Tile, x: number, z: number, px: number, py: number, s: number) {
+  if (t.bid) {
+    const def = buildingAt(t.bid);
+    if (!def) return;
+    const inset = Math.max(1, s * (t.bstage < 2 ? 0.2 : 0.08));
+    ctx.save();
+    ctx.globalAlpha = t.bstage === 6 ? 0.55 : 1;
+    ctx.fillStyle = cssHex(t.powered || t.bstage < 3 ? def.wall : shade(def.wall, 0.45));
+    if (t.bstage < 2) {
+      ctx.setLineDash([Math.max(2, s * 0.14), Math.max(2, s * 0.1)]);
+      ctx.strokeStyle = ctx.fillStyle;
+      ctx.strokeRect(px + inset, py + inset, s - inset * 2, s - inset * 2);
+      ctx.setLineDash([]);
+    } else {
+      ctx.fillRect(px + inset, py + inset, s - inset * 2, s - inset * 2);
+    }
+    if (t.bax === x && t.baz === z && s > 11 && t.bstage >= 2) {
+      const fp = footprint(def, x, z, t.brot);
+      ctx.fillStyle = cssHex(def.roofCol);
+      ctx.fillRect(px + s * 0.28, py + s * 0.28, s * 0.28 * Math.min(2, fp.w), s * 0.18);
+    }
+    ctx.restore();
+    return;
+  }
   if (s < 7) {
     if (t.zone !== "none" && t.level > 0 && t.plop === "none") {
       const inset = Math.max(1, s * 0.22);

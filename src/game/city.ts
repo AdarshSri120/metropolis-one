@@ -1,4 +1,16 @@
 import { emptyCensus, engineMods, takeCensus, type Census } from "./census";
+import {
+  BUILDINGS,
+  FACING,
+  STAGES,
+  buildingAt,
+  buildingById,
+  buildingIndex,
+  buildingUpkeep,
+  chunkIndex,
+  footprint,
+  occupantFactor,
+} from "./buildings";
 export const W = 44;
 export const H = 34;
 export const TILE = 4;
@@ -274,6 +286,12 @@ export interface Tile {
   junction: number;
   gauge: number;
   basin: number;
+  bid: number;
+  brot: 0 | 1 | 2 | 3;
+  bseed: number;
+  bstage: number;
+  bax: number;
+  baz: number;
 }
 
 interface Persist {
@@ -291,6 +309,12 @@ interface Persist {
   junction: number;
   gauge: number;
   basin: number;
+  bid: number;
+  brot: 0 | 1 | 2 | 3;
+  bseed: number;
+  bstage: number;
+  bax: number;
+  baz: number;
 }
 
 interface Stroke {
@@ -397,6 +421,7 @@ export interface InspectInfo {
   rows: { k: string; v: string }[];
   canUpgrade: boolean;
   canBulldoze: boolean;
+  canTurn: boolean;
 }
 
 export interface Pt {
@@ -456,6 +481,12 @@ function makeTile(x: number): Tile {
     junction: 0,
     gauge: 0,
     basin: 0,
+    bid: 0,
+    brot: 0,
+    bseed: 0,
+    bstage: 0,
+    bax: -1,
+    baz: -1,
   };
 }
 
@@ -475,6 +506,12 @@ function persist(t: Tile): Persist {
     junction: t.junction,
     gauge: t.gauge,
     basin: t.basin,
+    bid: t.bid,
+    brot: t.brot,
+    bseed: t.bseed,
+    bstage: t.bstage,
+    bax: t.bax,
+    baz: t.baz,
   };
 }
 
@@ -493,6 +530,12 @@ function restore(t: Tile, p: Persist) {
   t.junction = p.junction || 0;
   t.gauge = p.gauge || 0;
   t.basin = p.basin || 0;
+  t.bid = p.bid || 0;
+  t.brot = p.brot === 1 || p.brot === 2 || p.brot === 3 ? p.brot : 0;
+  t.bseed = p.bseed || 0;
+  t.bstage = p.bstage || 0;
+  t.bax = Number.isFinite(p.bax) ? p.bax : -1;
+  t.baz = Number.isFinite(p.baz) ? p.baz : -1;
 }
 
 function clamp(n: number, a: number, b: number) {
@@ -577,6 +620,9 @@ export class City {
   camera = { yaw: 0.62, pitch: 0.78, distance: 118, x: 0, z: 0 };
   brush: Brush = "street";
   districtBrush = 1;
+  catalogId = "";
+  catalogRot: 0 | 1 | 2 | 3 = 0;
+  lastDrawMs = 0;
   layer: MapLayer = "city";
   laws: Laws = { night: false, trucks: false, busLane: false, adapt: false, fare: 8, toll: 0, headway: 6 };
   sector = 0;
@@ -590,6 +636,8 @@ export class City {
   private redoStack: Stroke[] = [];
   private stroke: Stroke | null = null;
   private pathStamp = "";
+  private visualAll = true;
+  private visualChunks = new Set<number>();
 
   constructor() {
     this.tiles = Array.from({ length: W * H }, (_, i) => makeTile(i % W));
@@ -625,6 +673,19 @@ export class City {
   private remember(i: number) {
     if (!this.stroke) this.beginStroke();
     if (this.stroke && !this.stroke.before.has(i)) this.stroke.before.set(i, persist(this.tiles[i]));
+  }
+
+  markVisual(x: number, z: number) {
+    this.dirtyVisual = true;
+    if (x < 0 || z < 0 || x >= W || z >= H) return;
+    this.visualChunks.add(chunkIndex(x, z));
+  }
+
+  pullVisualDirty() {
+    const out = this.visualAll || this.visualChunks.size === 0 ? [0, 1, 2, 3] : [...this.visualChunks];
+    this.visualAll = false;
+    this.visualChunks.clear();
+    return out;
   }
 
   private spend(amount: number) {
@@ -717,6 +778,7 @@ export class City {
       this.apply(t, tool, x, z);
     }
     this.selected = { x, z };
+    this.markVisual(x, z);
     this.dirtyVisual = true;
     return null;
   }
@@ -724,9 +786,10 @@ export class City {
   private reason(t: Tile, tool: ToolId): string | null {
     const spec = TOOLS[tool];
     if (tool === "bulldoze") {
-      if (!t.road && t.track === "none" && t.zone === "none" && t.plop === "none" && !t.district && !t.elev && !t.basin && !t.junction) return "Nothing here";
+      if (!t.road && t.track === "none" && t.zone === "none" && t.plop === "none" && !t.district && !t.elev && !t.basin && !t.junction && !t.bid) return "Nothing here";
       return null;
     }
+    if (t.bid && tool !== "inspect") return "Bulldoze the building first";
     if (tool === "land") {
       if (t.ground === 1 && !t.basin && this.brush === "canal") return "The river is already here";
       if ((t.plop !== "none" || t.zone !== "none") && (this.brush === "canal" || this.brush === "raise")) return "Bulldoze the building first";
@@ -909,6 +972,10 @@ export class City {
   }
 
   private peel(t: Tile) {
+    if (t.bid) {
+      this.clearStructure(t.bax, t.baz, t.bid);
+      return;
+    }
     if (t.plop !== "none") {
       t.plop = "none";
       return;
@@ -943,6 +1010,7 @@ export class City {
   }
 
   private layerValue(t: Tile) {
+    if (t.bid) return buildingAt(t.bid)?.cost ?? 0;
     if (t.plop !== "none") return TOOLS[t.plop]?.cost ?? 0;
     if (t.zone !== "none") return (TOOLS[t.zone]?.cost ?? 40) + t.level * 400;
     if (t.track !== "none") return TOOLS[t.track]?.cost ?? 0;
@@ -950,8 +1018,139 @@ export class City {
     return 0;
   }
 
-  upgrade(x: number, z: number): string | null {
+  private anchorTile(t: Tile) {
+    if (!t.bid || t.bax < 0 || t.baz < 0 || t.bax >= W || t.baz >= H) return t;
+    const a = this.tile(t.bax, t.baz);
+    return a.bid === t.bid ? a : t;
+  }
+
+  private clearStructure(ax: number, az: number, bid: number) {
+    for (let i = 0; i < this.tiles.length; i++) {
+      const o = this.tiles[i];
+      if (o.bid !== bid || o.bax !== ax || o.baz !== az) continue;
+      this.remember(i);
+      o.bid = 0;
+      o.brot = 0;
+      o.bseed = 0;
+      o.bstage = 0;
+      o.bax = -1;
+      o.baz = -1;
+      this.markVisual(i % W, (i / W) | 0);
+    }
+  }
+
+  private writeStructure(cells: { x: number; z: number }[], index: number, rot: 0 | 1 | 2 | 3, seed: number, stage: number, ax: number, az: number) {
+    for (const c of cells) {
+      const i = this.idx(c.x, c.z);
+      this.remember(i);
+      const t = this.tiles[i];
+      t.bid = index;
+      t.brot = rot;
+      t.bseed = seed;
+      t.bstage = stage;
+      t.bax = ax;
+      t.baz = az;
+      t.zone = "none";
+      t.level = 0;
+      t.grow = 0;
+      t.plop = "none";
+      this.markVisual(c.x, c.z);
+    }
+  }
+
+  buildingError(x: number, z: number, id: string, rot: number, keep?: { x: number; z: number }) {
+    const def = buildingById(id);
+    if (!def) return "Unknown building";
+    const fp = footprint(def, x, z, rot);
+    for (const c of fp.cells) {
+      if (c.x < 0 || c.z < 0 || c.x >= W || c.z >= H) return "That footprint does not fit";
+      const t = this.tile(c.x, c.z);
+      const owned = !!keep && t.bid > 0 && t.bax === keep.x && t.baz === keep.z;
+      if (t.ground === 1 || t.basin) return "Buildings stay on land";
+      if (!owned && t.bid) return "These tiles overlap another building";
+      if (!owned && (t.road || t.track !== "none" || t.plop !== "none" || t.zone !== "none")) return "Clear the tiles before placing a building";
+      if (this.steep(c.x, c.z)) return "Too steep. Flatten the land first";
+    }
+    const open = fp.door.filter((c) => c.x >= 0 && c.z >= 0 && c.x < W && c.z < H);
+    if (!open.length) return "The entrance would leave the map";
+    if (!open.some((c) => this.tile(c.x, c.z).road)) return "The entrance has to face a road";
+    return null;
+  }
+
+  placeBuilding(x: number, z: number, id: string, rot: number) {
+    const def = buildingById(id);
+    if (!def) return "Unknown building";
+    const err = this.buildingError(x, z, id, rot);
+    if (err) return err;
+    const turn = (((rot % 4) + 4) % 4) as 0 | 1 | 2 | 3;
+    if (!this.spend(def.cost)) return "Not enough treasury";
+    const fp = footprint(def, x, z, turn);
+    const seed = Math.abs((x * 131 + z * 17 + turn * 13 + (this.revision % 97)) % 997);
+    this.writeStructure(fp.cells, buildingIndex(id), turn, seed, 0, x, z);
+    this.construction += def.cost;
+    this.selected = { x, z };
+    return null;
+  }
+
+  turnBuilding(x: number, z: number) {
+    if (x < 0 || z < 0 || x >= W || z >= H) return "Outside the map";
     const t = this.tile(x, z);
+    if (!t.bid) return "Nothing to rotate";
+    const ax = t.bax;
+    const az = t.baz;
+    const a = this.tile(ax, az);
+    const def = buildingAt(a.bid);
+    if (!def) return "Unknown building";
+    const next = ((a.brot + 1) % 4) as 0 | 1 | 2 | 3;
+    const err = this.buildingError(ax, az, def.id, next, { x: ax, z: az });
+    if (err) return err;
+    const bid = a.bid;
+    const seed = a.bseed;
+    const stage = a.bstage;
+    const fp = footprint(def, ax, az, next);
+    this.beginStroke();
+    this.clearStructure(ax, az, bid);
+    this.writeStructure(fp.cells, bid, next, seed, stage, ax, az);
+    this.endStroke();
+    this.selected = { x: ax, z: az };
+    return null;
+  }
+
+  upgrade(x: number, z: number): string | null {
+    const here = x >= 0 && z >= 0 && x < W && z < H ? this.tile(x, z) : null;
+    if (here?.bid) {
+      const a = this.anchorTile(here);
+      const def = buildingAt(a.bid);
+      if (!def) return "Unknown building";
+      if (!def.upgrade) return "This building does not have a taller form";
+      if (a.bstage < 4) return "Finish construction first";
+      if (a.bstage === 6) return "An abandoned building cannot be upgraded";
+      const next = buildingById(def.upgrade);
+      if (!next || next.w !== def.w || next.d !== def.d) return "The next form does not fit this footprint";
+      if (!a.powered || !a.watered) return "It needs power and water";
+      const cost = Math.round(next.cost * 0.45);
+      this.beginStroke();
+      if (!this.spend(cost)) {
+        this.stroke = null;
+        return "Not enough treasury";
+      }
+      const index = buildingIndex(next.id);
+      const oldBid = a.bid;
+      const ax = a.bax;
+      const az = a.baz;
+      for (let i = 0; i < this.tiles.length; i++) {
+        const o = this.tiles[i];
+        if (o.bid !== oldBid || o.bax !== ax || o.baz !== az) continue;
+        this.remember(i);
+        o.bid = index;
+        o.bstage = 5;
+        this.markVisual(i % W, (i / W) | 0);
+      }
+      this.construction += cost;
+      this.endStroke();
+      return null;
+    }
+    const t = here;
     if (!t || t.zone === "none") return "Zone this tile before upgrading it";
     if (t.level >= 5) return "Already at the top floor";
     if (!t.served || !t.powered || !t.watered) return "It needs a road plus power and water";
@@ -971,6 +1170,33 @@ export class City {
 
   inspectInfo(x: number, z: number): InspectInfo {
     const t = this.tile(x, z);
+    const built = t.bid ? this.anchorTile(t) : null;
+    const def = built ? buildingAt(built.bid) : null;
+    if (def && built) {
+      const people = Math.round(def.pop * occupantFactor(built.bstage) * (built.powered && built.watered ? 1 : built.served ? 0.35 : 0));
+      const jobs = Math.round(def.jobs * occupantFactor(built.bstage) * (built.powered && built.watered ? 1 : built.served ? 0.35 : 0));
+      return {
+        x: built.bax,
+        z: built.baz,
+        title: def.name,
+        subtitle: STAGES[built.bstage] ?? "Construction",
+        canUpgrade: !!def.upgrade && built.bstage === 4 && built.powered && built.watered,
+        canBulldoze: true,
+        canTurn: true,
+        rows: [
+          { k: "Footprint", v: `${def.w}×${def.d}` },
+          { k: "Facing", v: FACING[built.brot] ?? "south" },
+          { k: "Stage", v: STAGES[built.bstage] ?? "—" },
+          { k: "Occupants", v: def.pop ? compact(people) : "—" },
+          { k: "Jobs", v: def.jobs ? compact(jobs) : "—" },
+          { k: "Upkeep", v: `${rupee(buildingUpkeep(def, built.bstage))}/mo` },
+          { k: "Power", v: built.powered ? "Connected" : "Dark" },
+          { k: "Water", v: built.watered ? "Connected" : "Dry" },
+          { k: "Build cost", v: rupee(def.cost) },
+          { k: "Visual seed", v: String(built.bseed) },
+        ],
+      };
+    }
     const title =
       t.plop !== "none"
         ? TOOLS[t.plop].name
@@ -1004,6 +1230,7 @@ export class City {
       subtitle: t.ground ? "Waterfront" : t.zone !== "none" && t.level === 0 ? "Zoned. It builds when the city wants it." : "Tile",
       rows,
       canUpgrade: t.zone !== "none" && t.level < 5,
+      canTurn: false,
       canBulldoze: t.road || t.track !== "none" || t.zone !== "none" || t.plop !== "none",
     };
   }
@@ -1060,6 +1287,7 @@ export class City {
   }
 
   recompute(grow: boolean): void {
+    if (grow) this.advanceStructures();
     const season = seasonOf(this.month);
     const n = W * H;
     const powerNeed = new Float32Array(n);
@@ -1084,6 +1312,15 @@ export class City {
         powerNeed[i] += p.useP;
         waterNeed[i] += p.useW;
         if (p.pollute > 0) pollution[i] += p.pollute;
+      }
+      if (t.bid && t.bax === i % W && t.baz === ((i / W) | 0)) {
+        const def = buildingAt(t.bid);
+        if (def && t.bstage >= 1 && t.bstage !== 6) {
+          const mul = t.bstage >= 4 ? 1 : 0.25;
+          powerNeed[i] += def.useP * mul;
+          waterNeed[i] += def.useW * mul;
+          if (def.cat === "i") pollution[i] += 0.12;
+        }
       }
     }
 
@@ -1159,6 +1396,7 @@ export class City {
         t.comp = r >= 0 ? compOf[r] : -1;
       }
     }
+    this.linkBuildingRoads(compOf);
 
     const capP = comps.map(() => 0);
     const capW = comps.map(() => 0);
@@ -1346,6 +1584,22 @@ export class City {
         if (p.need && t.comp >= 0) goodsDemandC.set(t.comp, (goodsDemandC.get(t.comp) ?? 0) + p.need);
         if (p.port && t.comp >= 0) portComp.add(t.comp);
       }
+      if (t.bid && t.bax === i % W && t.baz === ((i / W) | 0)) {
+        const def = buildingAt(t.bid);
+        if (def) {
+          const scale = occupantFactor(t.bstage) * (t.powered && t.watered ? 1 : t.served ? 0.35 : 0);
+          if (def.cat === "r") {
+            popCap += def.pop;
+            pop += def.pop * scale;
+          }
+          const jobs = def.jobs * scale;
+          if (def.cat === "c") comJobs += jobs;
+          else if (def.cat === "i") indJobs += jobs;
+          else if (def.cat === "o") offJobs += jobs;
+          else if (def.cat === "r") resJobs += jobs;
+          else plopJobs += jobs;
+        }
+      }
       if (powerNeed[i] > 0) {
         powerAsked += powerNeed[i];
         if (t.powered) powerGot += powerNeed[i];
@@ -1469,12 +1723,17 @@ export class City {
     let rrtsN = 0;
     let runN = 0;
     let serviceUp = 0;
-    for (const t of this.tiles) {
+    for (let i = 0; i < this.tiles.length; i++) {
+      const t = this.tiles[i];
       if (t.track === "rail") railN++;
       if (t.track === "metro") metroN++;
       if (t.track === "rrts") rrtsN++;
       if (t.track === "runway") runN++;
       if (t.plop !== "none") serviceUp += PLOP[t.plop].upkeep;
+      if (t.bid && t.bax === i % W && t.baz === ((i / W) | 0)) {
+        const def = buildingAt(t.bid);
+        if (def) serviceUp += buildingUpkeep(def, t.bstage);
+      }
     }
     const roadUp = roads * 4.5;
     const transitUp = railN * 9 + metroN * 14 + rrtsN * 18 + runN * 16;
@@ -1632,7 +1891,56 @@ export class City {
     this.rebuildPaths();
     this.hasPort = this.tiles.some((t) => t.plop === "port");
     this.hasMarina = this.tiles.some((t) => t.plop === "marina" || t.plop === "ferry");
+    this.visualAll = true;
+    this.dirtyVisual = true;
     this.revision++;
+  }
+
+  private linkBuildingRoads(compOf: Int32Array) {
+    for (let i = 0; i < this.tiles.length; i++) {
+      const t = this.tiles[i];
+      const x = i % W;
+      const z = (i / W) | 0;
+      if (!t.bid || t.bax !== x || t.baz !== z) continue;
+      const def = buildingAt(t.bid);
+      if (!def) continue;
+      const fp = footprint(def, x, z, t.brot);
+      let comp = -1;
+      for (const door of fp.door) {
+        if (door.x < 0 || door.z < 0 || door.x >= W || door.z >= H) continue;
+        if (!this.tile(door.x, door.z).road) continue;
+        const linked = compOf[door.z * W + door.x];
+        if (linked >= 0) {
+          comp = linked;
+          break;
+        }
+      }
+      if (comp < 0) continue;
+      for (const cell of fp.cells) {
+        const tile = this.tile(cell.x, cell.z);
+        tile.served = true;
+        tile.comp = comp;
+      }
+    }
+  }
+
+  private advanceStructures() {
+    for (let i = 0; i < this.tiles.length; i++) {
+      const t = this.tiles[i];
+      if (!t.bid || t.bax !== i % W || t.baz !== ((i / W) | 0)) continue;
+      if (t.bstage < 4) t.bstage++;
+      else if (t.bstage === 5) t.bstage = 4;
+      else if (t.bstage === 4 && t.comp >= 0 && !t.powered && !t.watered) t.bstage = 6;
+    }
+    for (const t of this.tiles) {
+      if (!t.bid || t.bax < 0) continue;
+      const a = this.tile(t.bax, t.baz);
+      if (a.bid === t.bid) {
+        t.bstage = a.bstage;
+        t.brot = a.brot;
+        t.bseed = a.bseed;
+      }
+    }
   }
 
   private commute(powerPct: number) {
@@ -2105,7 +2413,7 @@ export class City {
 
   toJSON() {
     return {
-      version: 10,
+      version: 11,
       revision: this.revision,
       month: this.month,
       cash: this.cash,
@@ -2142,6 +2450,12 @@ export class City {
       t.junction || 0,
       t.gauge || 0,
       t.basin || 0,
+      t.bid || 0,
+      t.brot || 0,
+      t.bseed || 0,
+      t.bstage || 0,
+      t.bax,
+      t.baz,
     ]);
   }
 
@@ -2163,6 +2477,17 @@ export class City {
       t.junction = clamp(Number(row[11]) || 0, 0, 5);
       t.gauge = clamp(Number(row[12]) || 0, 0, 3);
       t.basin = row[13] === 1 ? 1 : 0;
+      const bid = clamp(Number(row[14]) || 0, 0, BUILDINGS.length);
+      t.bid = buildingAt(bid) ? bid : 0;
+      t.brot = row[15] === 1 ? 1 : row[15] === 2 ? 2 : row[15] === 3 ? 3 : 0;
+      t.bseed = clamp(Number(row[16]) || 0, 0, 100000);
+      t.bstage = clamp(Number(row[17]) || 0, 0, 6);
+      t.bax = Number.isFinite(Number(row[18])) ? clamp(Number(row[18]), -1, W - 1) : -1;
+      t.baz = Number.isFinite(Number(row[19])) ? clamp(Number(row[19]), -1, H - 1) : -1;
+      if (!t.bid) {
+        t.bax = -1;
+        t.baz = -1;
+      }
       if (t.basin) t.ground = 1;
       if (t.ground === 1 && !t.basin && i % W < WATER_X) t.ground = 0;
       if (t.ground === 1) {
@@ -2170,6 +2495,12 @@ export class City {
         t.level = 0;
         if (t.plop !== "port" && t.plop !== "marina" && t.plop !== "ferry") t.plop = "none";
         if (!t.road && t.track !== "none" && t.track !== "runway") t.track = "none";
+        t.bid = 0;
+        t.brot = 0;
+        t.bseed = 0;
+        t.bstage = 0;
+        t.bax = -1;
+        t.baz = -1;
       }
     });
   }
@@ -2177,10 +2508,7 @@ export class City {
   fromJSON(data: unknown): string | null {
     if (!data || typeof data !== "object") return "That file is not a city";
     const obj = data as Record<string, unknown>;
-    const modern =
-      (obj.version === 7 || obj.version === 8 || obj.version === 9 || obj.version === 10) &&
-      Array.isArray(obj.tiles) &&
-      obj.tiles.length === W * H;
+    const modern = modernSave(obj.version) && Array.isArray(obj.tiles) && obj.tiles.length === W * H;
     const legacy = Array.isArray(obj.grid);
     if (!modern && !legacy) return "Unrecognized city file";
     if (modern && (obj.tiles as unknown[]).some((row) => !Array.isArray(row))) {
@@ -2209,11 +2537,11 @@ export class City {
   }
 
   private loadModern(obj: Record<string, unknown>): string | null {
-    if ((obj.version === 7 || obj.version === 8 || obj.version === 9 || obj.version === 10) && Array.isArray(obj.tiles) && obj.tiles.length === W * H) {
+    if (modernSave(obj.version) && Array.isArray(obj.tiles) && obj.tiles.length === W * H) {
       const keptRevision = finite(obj.revision, this.revision, 0, 1e12);
       this.blank();
       this.loadDump(obj.tiles as unknown[]);
-      if (obj.version !== 10) {
+      if (Number(obj.version) < 10) {
         for (const t of this.tiles) if (t.oneWay === 2) t.oneWay = 3;
       }
       this.cash = finite(obj.cash, 850000, -250000, 1e12);
@@ -2459,6 +2787,10 @@ function roadsCount(tiles: Tile[]) {
   let n = 0;
   for (const t of tiles) if (t.road) n++;
   return n;
+}
+
+function modernSave(v: unknown) {
+  return v === 7 || v === 8 || v === 9 || v === 10 || v === 11;
 }
 
 function finite(v: unknown, fallback: number, min?: number, max?: number) {

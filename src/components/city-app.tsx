@@ -71,6 +71,8 @@ import { CityScene } from "@/game/scene";
 import { FlatCity } from "@/game/flat";
 import { PLAN, PLAN_CATS, PLAN_LIVE } from "@/game/plan";
 import { featureLine } from "@/game/census";
+import { BUILDINGS, FACING, type BCat } from "@/game/buildings";
+import { BuildingPreview } from "@/components/building-preview";
 import type { CityView, Gfx, ViewMode } from "@/game/view";
 
 const SAVE_KEY = "metropolis-one-v8";
@@ -121,6 +123,7 @@ interface Probe {
   place: (x: number, z: number, tool: ToolId) => string | null;
   setKeys: (codes: string[]) => void;
   getCam: () => { x: number; z: number; yaw: number; pitch: number; distance: number };
+  drawMs: () => number;
 }
 
 declare global {
@@ -262,6 +265,9 @@ export function CityApp() {
   const [confirmEmpty, setConfirmEmpty] = useState(false);
   const [street, setStreet] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [catalogQ, setCatalogQ] = useState("");
+  const [catalogCat, setCatalogCat] = useState<BCat | "all">("all");
   const [planQ, setPlanQ] = useState("");
   const [planMode, setPlanMode] = useState<"live" | "all" | "P0">("live");
   const [planCatId, setPlanCatId] = useState(0);
@@ -269,6 +275,7 @@ export function CityApp() {
   const streetRef = useRef(false);
   const viewLock = useRef(false);
   const toldLots = useRef(false);
+  const catalogRef = useRef("");
   const miniRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -360,6 +367,10 @@ export function CityApp() {
         return;
       }
       const hit = view.pick(e.clientX, e.clientY);
+      if (catalogRef.current && hit) {
+        arm = { x: e.clientX, y: e.clientY, hit, button: e.button };
+        return;
+      }
       if (toolRef.current === "inspect" && hit) {
         city.place(hit.x, hit.z, "inspect");
         setTick((n) => n + 1);
@@ -399,6 +410,7 @@ export function CityApp() {
       }
       if (!arm || arm.button !== 0) return;
       if (!painting) {
+        if (catalogRef.current) return;
         if (Math.hypot(e.clientX - arm.x, e.clientY - arm.y) < 8) return;
         if (!arm.hit) return;
         warned = "";
@@ -438,6 +450,14 @@ export function CityApp() {
         return;
       }
       if (tap && tap.button === 0 && travel < 10 && tap.hit) {
+        if (catalogRef.current) {
+          city.beginStroke();
+          const err = city.placeBuilding(tap.hit.x, tap.hit.z, catalogRef.current, city.catalogRot);
+          city.endStroke();
+          setToast(err ?? "Work has started. The door faces the road.");
+          setTick((n) => n + 1);
+          return;
+        }
         if (toolRef.current === "inspect") {
           city.place(tap.hit.x, tap.hit.z, "inspect");
           setTick((n) => n + 1);
@@ -581,6 +601,7 @@ export function CityApp() {
         for (const c of codes) view.keys.add(c);
       },
       getCam: () => ({ ...city.camera }),
+      drawMs: () => city.lastDrawMs,
     };
 
     return () => {
@@ -819,11 +840,22 @@ export function CityApp() {
               disabled={!info.canUpgrade}
               onClick={() => {
                 const err = city.upgrade(info.x, info.z);
-                setToast(err ?? "Floors added.");
+                setToast(err ?? "Upgrade started.");
                 setTick((n) => n + 1);
               }}
             >
               Upgrade
+            </button>
+            <button
+              className="ghost-btn"
+              disabled={!info.canTurn}
+              onClick={() => {
+                const err = city.turnBuilding(info.x, info.z);
+                setToast(err ?? "The door faces a new side.");
+                setTick((n) => n + 1);
+              }}
+            >
+              Turn
             </button>
             <button
               className="ghost-btn"
@@ -892,6 +924,8 @@ export function CityApp() {
                 key={t.id}
                 className={tool === t.id ? "tool on" : "tool"}
                 onClick={() => {
+                  city.catalogId = "";
+                  catalogRef.current = "";
                   setTool(t.id);
                   if (t.id !== "inspect") setHand(false);
                   if (t.id === "land" && !LAND_BRUSHES.some((b) => b.id === city.brush)) city.brush = "raise";
@@ -944,6 +978,16 @@ export function CityApp() {
             }}
           >
             {SECTORS[city.sector]}
+          </button>
+          <button
+            className={catalogOpen || city.catalogId ? "chip on" : "chip"}
+            onClick={() => {
+              setCatalogOpen(true);
+              setMenu(false);
+              setPlanOpen(false);
+            }}
+          >
+            Buildings
           </button>
           <button
             className={mode === "map" ? "chip on" : "chip"}
@@ -1413,6 +1457,79 @@ export function CityApp() {
               </button>
             </div>
           )}
+        </section>
+      ) : null}
+
+      {catalogOpen ? (
+        <section className="sheet" role="dialog" aria-label="Building catalogue">
+          <div className="muted">Catalogue</div>
+          <h2>Place a building</h2>
+          <p className="muted sheet-note">Search, rotate, then tap the map. The door has to face a road. A 2×2 stays one building across four tiles.</p>
+          <input
+            className="field"
+            value={catalogQ}
+            placeholder="Search buildings"
+            aria-label="Search buildings"
+            onChange={(e) => setCatalogQ(e.target.value)}
+          />
+          <div className="brush-row">
+            {(["all", "r", "c", "o", "i", "civic"] as const).map((id) => (
+              <button key={id} className={catalogCat === id ? "chip on" : "chip"} onClick={() => setCatalogCat(id)}>
+                {id === "all" ? "All" : id === "r" ? "Homes" : id === "c" ? "Shops" : id === "o" ? "Offices" : id === "i" ? "Works" : "Civic"}
+              </button>
+            ))}
+          </div>
+          {city.catalogId ? (
+            <>
+              <BuildingPreview def={BUILDINGS.find((b) => b.id === city.catalogId) ?? BUILDINGS[0]} seed={17} />
+              <div className="row-actions sheet-note">
+                <button
+                  className="ghost-btn"
+                  onClick={() => {
+                    city.catalogRot = (((city.catalogRot + 1) % 4) as 0 | 1 | 2 | 3);
+                    setTick((n) => n + 1);
+                  }}
+                >
+                  Door {FACING[city.catalogRot]}
+                </button>
+                <button
+                  className="ghost-btn"
+                  onClick={() => {
+                    city.catalogId = "";
+                    catalogRef.current = "";
+                    setTick((n) => n + 1);
+                  }}
+                >
+                  Stop placing
+                </button>
+              </div>
+            </>
+          ) : null}
+          <div className="catalog-list">
+            {BUILDINGS.filter((b) => (catalogCat === "all" || b.cat === catalogCat) && (!catalogQ.trim() || b.name.toLowerCase().includes(catalogQ.trim().toLowerCase()))).map((b) => (
+              <button
+                key={b.id}
+                className={city.catalogId === b.id ? "primary" : "ghost-btn"}
+                onClick={() => {
+                  city.catalogId = b.id;
+                  catalogRef.current = b.id;
+                  setHand(false);
+                  setToast(`${b.name}. ${b.w}×${b.d}. Tap land beside a road.`);
+                  setTick((n) => n + 1);
+                }}
+              >
+                <span>
+                  {b.name}
+                  <small>
+                    {b.w}×{b.d} · {b.floors} floors · {rupee(b.cost)}
+                  </small>
+                </span>
+              </button>
+            ))}
+          </div>
+          <button className="primary sheet-note" onClick={() => setCatalogOpen(false)}>
+            Back to city
+          </button>
         </section>
       ) : null}
 

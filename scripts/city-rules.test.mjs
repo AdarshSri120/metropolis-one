@@ -11,6 +11,8 @@ let W;
 let H;
 let commitCitySave;
 let restoreCitySave;
+let BUILDINGS;
+let structureParts;
 
 test.before(async () => {
   vite = await createServer({
@@ -25,6 +27,9 @@ test.before(async () => {
   H = mod.H;
   commitCitySave = mod.commitCitySave;
   restoreCitySave = mod.restoreCitySave;
+  const buildings = await vite.ssrLoadModule("/src/game/buildings.ts");
+  BUILDINGS = buildings.BUILDINGS;
+  structureParts = buildings.structureParts;
 });
 
 test.after(async () => {
@@ -95,7 +100,7 @@ test("a saved zero fare and a zero import duty come back as zero", () => {
   const again = city.toJSON();
   assert.equal(again.laws.fare, 0);
   assert.equal(again.taxes.tariff, 0);
-  assert.equal(again.version, 10);
+  assert.equal(again.version, 11);
   assert.equal(city.fromJSON(again), null);
   assert.equal(city.laws.fare, 0);
   assert.equal(city.taxes.tariff, 0);
@@ -368,7 +373,7 @@ test("one-way directions 0 through 4 survive a save and a load", () => {
     city.tile(0, 0).road = true;
     city.tile(0, 0).oneWay = way;
     const data = city.toJSON();
-    assert.equal(data.version, 10);
+    assert.equal(data.version, 11);
     assert.equal(data.tiles[0][8], way);
     const next = new City();
     next.showcase();
@@ -492,3 +497,212 @@ test("a corrupt newest save falls back to the previous city", () => {
   assert.equal(restoreCitySave(none, memStore({ a: "{broken", b: "not json" }), ["a", "b"]), null);
   assert.equal(none.snap.pop, pop);
 });
+
+function stroke(city, x, z, tool) {
+  city.beginStroke();
+  const err = city.place(x, z, tool);
+  city.endStroke();
+  assert.equal(err, null, `${tool} ${x},${z} ${err}`);
+}
+
+function serviceStreet(city) {
+  for (let x = 4; x <= 14; x++) stroke(city, x, 8, "road");
+  for (let z = 4; z <= 7; z++) stroke(city, 7, z, "road");
+  stroke(city, 4, 7, "power");
+  stroke(city, 10, 7, "water");
+}
+
+test("the catalogue has twenty-four different buildings", () => {
+  assert.equal(BUILDINGS.length, 24);
+  const ids = new Set(BUILDINGS.map((b) => b.id));
+  assert.equal(ids.size, 24);
+  const cats = new Set(BUILDINGS.map((b) => b.cat));
+  for (const cat of ["r", "c", "i", "o", "civic"]) assert.equal(cats.has(cat), true);
+  const sizes = new Set(BUILDINGS.map((b) => `${b.w}x${b.d}`));
+  for (const size of ["1x1", "1x2", "2x2", "2x3", "3x3"]) assert.equal(sizes.has(size), true);
+  const silhouettes = new Set(
+    BUILDINGS.map((def) =>
+      structureParts(def, 0, 4, true)
+        .map((p) => `${p.k}:${p.sx.toFixed(2)}:${p.sy.toFixed(2)}:${p.sz.toFixed(2)}:${p.y.toFixed(2)}:${p.x.toFixed(2)}:${p.c}`)
+        .join("|"),
+    ),
+  );
+  assert.equal(silhouettes.size, 24);
+  const society = BUILDINGS.find((b) => b.id === "society");
+  const faded = structureParts(society, 1, 4, true)[0].c;
+  const other = structureParts(society, 8, 4, true)[0].c;
+  assert.notEqual(faded, other);
+});
+
+test("a rotated 2x2 society keeps people, seed and treasury after three months", () => {
+  const city = new City();
+  city.blank();
+  serviceStreet(city);
+
+  const before = city.cash;
+  city.beginStroke();
+  assert.equal(city.placeBuilding(5, 6, "society", 0), null);
+  city.endStroke();
+  assert.equal(city.cash, before - 28000);
+  const seed = city.tile(5, 6).bseed;
+  for (const [x, z] of [
+    [5, 6],
+    [6, 6],
+    [5, 7],
+    [6, 7],
+  ]) {
+    const t = city.tile(x, z);
+    assert.equal(t.bax, 5);
+    assert.equal(t.baz, 6);
+    assert.equal(t.brot, 0);
+    assert.equal(t.bseed, seed);
+    assert.equal(t.bstage, 0);
+  }
+  assert.equal(city.tile(7, 6).bid, 0);
+  const looked = city.inspectInfo(6, 7);
+  assert.equal(looked.title, "Housing society");
+  assert.equal(looked.subtitle, "Excavation");
+  assert.equal(looked.rows.find((row) => row.k === "Facing").v, "south");
+  assert.equal(looked.rows.find((row) => row.k === "Visual seed").v, String(seed));
+  assert.equal(looked.rows.find((row) => row.k === "Occupants").v, "0");
+
+  const parked = city.cash;
+  city.beginStroke();
+  const overlap = city.placeBuilding(6, 6, "society", 0);
+  city.endStroke();
+  assert.match(overlap, /overlap/);
+  assert.equal(city.cash, parked);
+  assert.equal(city.tile(7, 6).bid, 0);
+
+  city.beginStroke();
+  const blocked = city.placeBuilding(1, 1, "shop", 0);
+  city.endStroke();
+  assert.match(blocked, /road/);
+  assert.equal(city.tile(1, 1).bid, 0);
+
+  city.beginStroke();
+  assert.equal(city.turnBuilding(6, 7), null);
+  city.endStroke();
+  assert.equal(city.tile(5, 6).brot, 1);
+  assert.equal(city.tile(6, 7).bseed, seed);
+  assert.equal(city.inspectInfo(5, 6).rows.find((row) => row.k === "Facing").v, "east");
+
+  assert.equal(city.undo(), true);
+  assert.equal(city.tile(5, 6).brot, 0);
+  assert.equal(city.redo(), true);
+  assert.equal(city.tile(5, 6).brot, 1);
+  assert.equal(city.undo(), true);
+  const withHouse = city.cash;
+  assert.equal(city.undo(), true);
+  assert.equal(city.tile(5, 6).bid, 0);
+  assert.equal(city.tile(6, 7).bid, 0);
+  assert.equal(city.cash, withHouse + 28000);
+  assert.equal(city.redo(), true);
+  assert.equal(city.tile(5, 6).bseed, seed);
+  assert.equal(city.cash, withHouse);
+  city.beginStroke();
+  assert.equal(city.turnBuilding(5, 6), null);
+  city.endStroke();
+
+  for (let month = 0; month < 3; month++) city.monthTick();
+  const anchor = city.tile(5, 6);
+  assert.equal(anchor.bstage, 3);
+  assert.equal(anchor.brot, 1);
+  assert.equal(anchor.bseed, seed);
+  assert.equal(anchor.powered, true);
+  assert.equal(anchor.watered, true);
+  assert.equal(Math.round(city.snap.pop), 99);
+  assert.equal(city.snap.cash, Math.round(city.cash));
+  const people = city.inspectInfo(6, 6).rows.find((row) => row.k === "Occupants").v;
+  assert.equal(people, "99");
+
+  const file = city.toJSON();
+  assert.equal(file.version, 11);
+  const next = new City();
+  next.showcase();
+  assert.equal(next.fromJSON(file), null);
+  const back = next.tile(5, 6);
+  assert.equal(back.bax, 5);
+  assert.equal(back.baz, 6);
+  assert.equal(back.brot, 1);
+  assert.equal(back.bseed, seed);
+  assert.equal(back.bstage, 3);
+  assert.equal(Math.round(next.snap.pop), 99);
+  assert.equal(next.cash, city.cash);
+  assert.equal(next.snap.cash, city.snap.cash);
+  assert.equal(next.snap.budget.exportSales, city.snap.budget.exportSales);
+  assert.equal(next.snap.income, city.snap.income);
+
+  const cashBefore = next.cash;
+  next.beginStroke();
+  assert.equal(next.place(6, 7, "bulldoze"), null);
+  next.endStroke();
+  for (const [x, z] of [
+    [5, 6],
+    [6, 6],
+    [5, 7],
+    [6, 7],
+  ]) {
+    assert.equal(next.tile(x, z).bid, 0);
+  }
+  assert.equal(next.cash, cashBefore + Math.round(28000 * 0.3));
+  assert.equal(next.undo(), true);
+  assert.equal(next.tile(5, 6).bseed, seed);
+  assert.equal(next.tile(5, 6).bstage, 3);
+
+  const current = next.toJSON();
+  current.tiles[0][1] = 1;
+  current.tiles[0][8] = 2;
+  assert.equal(next.fromJSON(current), null);
+  assert.equal(next.tile(0, 0).oneWay, 2);
+  assert.equal(next.tile(5, 6).brot, 1);
+
+  const old = city.toJSON();
+  old.version = 10;
+  old.tiles = old.tiles.map((row) => row.slice(0, 14));
+  old.tiles[2][1] = 1;
+  old.tiles[2][8] = 2;
+  const host = new City();
+  host.blank();
+  assert.equal(host.fromJSON(old), null);
+  assert.equal(host.tile(2, 0).oneWay, 2);
+  assert.equal(host.tile(5, 6).bid, 0);
+});
+
+test("affordable housing upgrades, and a dark society is abandoned", () => {
+  const city = new City();
+  city.blank();
+  serviceStreet(city);
+  city.beginStroke();
+  assert.equal(city.placeBuilding(5, 6, "affordable", 0), null);
+  city.endStroke();
+  for (const [x, z] of [
+    [5, 6],
+    [6, 6],
+    [5, 7],
+    [6, 7],
+  ]) {
+    city.tile(x, z).bstage = 4;
+  }
+  city.recompute(false);
+  assert.equal(city.tile(5, 6).powered, true);
+  assert.equal(city.upgrade(6, 7), null);
+  assert.equal(city.inspectInfo(5, 6).title, "Housing society");
+  assert.equal(city.tile(6, 6).bstage, 5);
+  city.monthTick();
+  assert.equal(city.tile(5, 6).bstage, 4);
+  assert.ok(city.snap.pop > 200);
+
+  const dark = new City();
+  dark.blank();
+  for (let x = 4; x <= 14; x++) stroke(dark, x, 8, "road");
+  dark.beginStroke();
+  assert.equal(dark.placeBuilding(5, 6, "society", 0), null);
+  dark.endStroke();
+  for (let month = 0; month < 5; month++) dark.monthTick();
+  assert.equal(dark.tile(5, 6).bstage, 6);
+  assert.equal(Math.round(dark.snap.pop), 0);
+  assert.equal(dark.snap.budget.services, 80);
+  assert.equal(dark.inspectInfo(5, 7).subtitle, "Abandoned");
+});
+

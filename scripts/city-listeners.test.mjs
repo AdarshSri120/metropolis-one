@@ -39,6 +39,10 @@ test("scroll and right-click listeners do not stack when the view changes", asyn
     await page.waitForTimeout(400);
     const counts = await page.evaluate(() => window.__camListeners);
     assert.deepEqual(counts, { wheel: 1, contextmenu: 1 });
+    const drawMs = await page.evaluate(() => window.__city.drawMs());
+    assert.equal(typeof drawMs, "number");
+    assert.equal(Number.isFinite(drawMs), true);
+    assert.ok(drawMs >= 0);
   } finally {
     await browser.close();
   }
