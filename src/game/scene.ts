@@ -305,7 +305,9 @@ export class CityScene implements CityView {
           else if (t.junction === 1) add(box, X, Z, 0.28, 0.9, 0.28, deck, 0x2a3138);
           else if (t.junction === 5) add(box, X, Z, 1.4, 0.08, 0.35, deck, HEX.sand);
           else if (t.oneWay === 1) add(box, X + 0.45, Z, 0.7, 0.03, 0.16, deck, 0xf2e2a0);
-          else if (t.oneWay === 2) add(box, X, Z + 0.45, 0.16, 0.03, 0.7, deck, 0xf2e2a0);
+          else if (t.oneWay === 2) add(box, X - 0.45, Z, 0.7, 0.03, 0.16, deck, 0xf2e2a0);
+          else if (t.oneWay === 3) add(box, X, Z + 0.45, 0.16, 0.03, 0.7, deck, 0xf2e2a0);
+          else if (t.oneWay === 4) add(box, X, Z - 0.45, 0.16, 0.03, 0.7, deck, 0xf2e2a0);
           else if (horiz && !vert) add(box, X, Z, 1.15, 0.02, 0.1, deck, HEX.mark);
           else if (vert && !horiz) add(box, X, Z, 0.1, 0.02, 1.15, deck, HEX.mark);
           if (!bridge && (x * 3 + z * 5) % 7 === 0) {

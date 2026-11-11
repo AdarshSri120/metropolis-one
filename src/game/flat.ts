@@ -151,6 +151,31 @@ export class FlatCity implements CityView {
           ctx.arc(px + s * 0.5, py + s * 0.5, Math.max(1.5, s * 0.16), 0, Math.PI * 2);
           ctx.fill();
         }
+        if (t.oneWay && city.layer === "city" && s >= 8) {
+          ctx.fillStyle = "#f2e2a0";
+          ctx.beginPath();
+          const cx = px + s * 0.5;
+          const cy = py + s * 0.5;
+          const a = s * 0.22;
+          if (t.oneWay === 1) {
+            ctx.moveTo(cx + a, cy);
+            ctx.lineTo(cx - a * 0.55, cy - a * 0.7);
+            ctx.lineTo(cx - a * 0.55, cy + a * 0.7);
+          } else if (t.oneWay === 2) {
+            ctx.moveTo(cx - a, cy);
+            ctx.lineTo(cx + a * 0.55, cy - a * 0.7);
+            ctx.lineTo(cx + a * 0.55, cy + a * 0.7);
+          } else if (t.oneWay === 3) {
+            ctx.moveTo(cx, cy + a);
+            ctx.lineTo(cx - a * 0.7, cy - a * 0.55);
+            ctx.lineTo(cx + a * 0.7, cy - a * 0.55);
+          } else {
+            ctx.moveTo(cx, cy - a);
+            ctx.lineTo(cx - a * 0.7, cy + a * 0.55);
+            ctx.lineTo(cx + a * 0.7, cy + a * 0.55);
+          }
+          ctx.fill();
+        }
         if (t.district && city.layer === "city") {
           ctx.fillStyle = ["#0000", "#c46b4a", "#7eb6e6", "#e4c27a", "#6dcea0"][t.district] ?? "#fff";
           ctx.fillRect(px + s - Math.max(3, s * 0.16), py, Math.max(3, s * 0.16), Math.max(3, s * 0.16));

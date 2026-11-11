@@ -415,7 +415,7 @@
 
 .tax {
   display: grid;
-  grid-template-columns: 76px 1fr 48px;
+  grid-template-columns: 108px 1fr 48px;
   gap: 8px;
   align-items: center;
   font-size: 13px;

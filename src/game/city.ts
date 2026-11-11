@@ -4,7 +4,7 @@ export const H = 34;
 export const TILE = 4;
 export const WATER_X = 37;
 export type RoadKind = 0 | 1 | 2;
-export type OneWay = 0 | 1 | 2;
+export type OneWay = 0 | 1 | 2 | 3 | 4;
 export type Brush =
   | "street"
   | "avenue"
@@ -850,7 +850,8 @@ export class City {
     }
     if (tool === "road") {
       if (this.brush === "oneway") {
-        t.oneWay = t.oneWay === 1 ? 2 : 1;
+        const next: OneWay[] = [1, 2, 3, 4, 1];
+        t.oneWay = next[t.oneWay] ?? 1;
         return;
       }
       if (this.brush === "district") {
@@ -976,7 +977,7 @@ export class City {
           : t.track !== "none"
             ? TOOLS[t.track].name
             : t.road
-              ? `${roadLabel(t.roadKind)}${t.ground ? " bridge" : ""}${t.oneWay === 1 ? " · east-west" : t.oneWay === 2 ? " · north-south" : ""}`
+              ? `${roadLabel(t.roadKind)}${t.ground ? " bridge" : ""}${t.oneWay ? ` · ${WAY[t.oneWay]} only` : ""}`
               : t.district
                 ? DISTRICTS[t.district]
                 : t.ground
@@ -1456,7 +1457,9 @@ export class City {
     const comTax = comJobs * 3.6 * (this.taxes.c / 10);
     const indTax = indJobs * 3.1 * (this.taxes.i / 8);
     const offTax = offJobs * 4.4 * (this.taxes.o / 10);
-    const tradeIn = exports * 1.8 + exports * (this.taxes.tariff / 100) * 6;
+    const exportSales = exports * 1.8;
+    const importDuty = imports * (this.taxes.tariff / 100) * 6;
+    const tradeIn = exportSales + importDuty;
     let railN = 0;
     let metroN = 0;
     let rrtsN = 0;
@@ -2096,7 +2099,7 @@ export class City {
 
   toJSON() {
     return {
-      version: 9,
+      version: 10,
       month: this.month,
       cash: this.cash,
       sandbox: this.sandbox,
@@ -2147,7 +2150,7 @@ export class City {
       t.level = clamp(Number(row[5]) || 0, 0, 5);
       t.grow = clamp(Number(row[6]) || 0, 0, 120);
       t.roadKind = row[7] === 2 ? 2 : row[7] === 1 ? 1 : 0;
-      t.oneWay = row[8] === 2 ? 2 : row[8] === 1 ? 1 : 0;
+      t.oneWay = row[8] === 4 ? 4 : row[8] === 3 ? 3 : row[8] === 2 ? 2 : row[8] === 1 ? 1 : 0;
       t.district = clamp(Number(row[9]) || 0, 0, 4);
       t.elev = clamp(Number(row[10]) || 0, 0, 4);
       t.junction = clamp(Number(row[11]) || 0, 0, 5);
@@ -2167,9 +2170,12 @@ export class City {
   fromJSON(data: unknown): string | null {
     if (!data || typeof data !== "object") return "That file is not a city";
     const obj = data as Record<string, unknown>;
-    if ((obj.version === 7 || obj.version === 8 || obj.version === 9) && Array.isArray(obj.tiles) && obj.tiles.length === W * H) {
+    if ((obj.version === 7 || obj.version === 8 || obj.version === 9 || obj.version === 10) && Array.isArray(obj.tiles) && obj.tiles.length === W * H) {
       this.blank();
       this.loadDump(obj.tiles as unknown[]);
+      if (obj.version !== 10) {
+        for (const t of this.tiles) if (t.oneWay === 2) t.oneWay = 3;
+      }
       this.cash = finite(obj.cash, 850000, -250000, 1e12);
       this.month = finite(obj.month, 0, 0, 5000);
       this.sandbox = obj.sandbox === true;
@@ -2180,9 +2186,9 @@ export class City {
           trucks: law.trucks === true,
           busLane: law.busLane === true,
           adapt: law.adapt === true,
-          fare: clamp(Number(law.fare) || 8, 0, 30),
-          toll: clamp(Number(law.toll) || 0, 0, 20),
-          headway: clamp(Number(law.headway) || 6, 2, 20),
+          fare: finite(law.fare, 8, 0, 30),
+          toll: finite(law.toll, 0, 0, 20),
+          headway: finite(law.headway, 6, 2, 20),
         };
       }
       if (typeof obj.placeName === "string" && obj.placeName.trim()) this.placeName = obj.placeName.trim().slice(0, 32);
@@ -2195,11 +2201,11 @@ export class City {
       if (obj.taxes && typeof obj.taxes === "object") {
         const tax = obj.taxes as Record<string, unknown>;
         this.setTax({
-          r: Number(tax.r) || 9,
-          c: Number(tax.c) || 10,
-          i: Number(tax.i) || 8,
-          o: Number(tax.o) || 10,
-          tariff: Number(tax.tariff) || 4,
+          r: finite(tax.r, 9, 1, 25),
+          c: finite(tax.c, 10, 1, 25),
+          i: finite(tax.i, 8, 1, 25),
+          o: finite(tax.o, 10, 1, 25),
+          tariff: finite(tax.tariff, 4, 0, 20),
         });
       }
       this.history = Array.isArray(obj.history)
@@ -2372,11 +2378,32 @@ function finite(v: unknown, fallback: number, min?: number, max?: number) {
 }
 
 function roadLegal(city: City, x: number, z: number, nx: number, nz: number) {
-  const dx = nx - x;
-  const dz = nz - z;
-  const axis = (oneWay: number) => (oneWay === 1 ? dz === 0 : oneWay === 2 ? dx === 0 : true);
-  return axis(city.tile(x, z).oneWay) && axis(city.tile(nx, nz).oneWay);
+  const dx = Math.sign(nx - x);
+  const dz = Math.sign(nz - z);
+  if (dx === 0 && dz === 0) return false;
+  const from = city.tile(x, z).oneWay;
+  const to = city.tile(nx, nz).oneWay;
+  if (!bearingOk(from, dx, dz)) return false;
+  return !bearingAgainst(to, dx, dz);
 }
+
+function bearingOk(oneWay: number, dx: number, dz: number) {
+  if (oneWay === 1) return dx === 1 && dz === 0;
+  if (oneWay === 2) return dx === -1 && dz === 0;
+  if (oneWay === 3) return dx === 0 && dz === 1;
+  if (oneWay === 4) return dx === 0 && dz === -1;
+  return true;
+}
+
+function bearingAgainst(oneWay: number, dx: number, dz: number) {
+  if (oneWay === 1) return dx < 0;
+  if (oneWay === 2) return dx > 0;
+  if (oneWay === 3) return dz < 0;
+  if (oneWay === 4) return dz > 0;
+  return false;
+}
+
+const WAY = ["", "east", "west", "south", "north"] as const;
 
 function neighbors(city: City, x: number, z: number, ok: (x: number, z: number) => boolean) {
   const out: Pt[] = [];

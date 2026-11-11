@@ -208,7 +208,7 @@ const RAIL_BRUSHES: { id: Brush; label: string }[] = [
 ];
 
 function roadCostLine(brush: Brush) {
-  if (brush === "oneway") return "One-way. Paint a road that already exists. ₹40.";
+  if (brush === "oneway") return "One-way. Tap again for east, west, south, then north. Cars cannot reverse. ₹40.";
   if (brush === "district") return "Name a district. Free. Tap District again to change which one.";
   if (brush === "signal" || brush === "roundabout" || brush === "stop" || brush === "yield") return "Paint a junction on a road. ₹60.";
   if (brush === "ramp") return "Ramp on an expressway. ₹60.";
@@ -466,22 +466,34 @@ export function CityApp() {
     canvas.addEventListener("pointermove", onMove);
     canvas.addEventListener("pointerup", onUp);
     canvas.addEventListener("pointercancel", onUp);
-    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-    canvas.addEventListener(
-      "wheel",
-      (e) => {
-        e.preventDefault();
-        if (e.shiftKey) view.pitchBy(e.deltaY > 0 ? -0.06 : 0.06);
-        else view.zoomBy(e.deltaY > 0 ? 1.08 : 0.92);
-      },
-      { passive: false },
-    );
+    const onMenu = (e: Event) => {
+      e.preventDefault();
+    };
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      if (e.shiftKey) view.pitchBy(e.deltaY > 0 ? -0.06 : 0.06);
+      else view.zoomBy(e.deltaY > 0 ? 1.08 : 0.92);
+    };
+    canvas.addEventListener("contextmenu", onMenu);
+    canvas.addEventListener("wheel", onWheel, { passive: false });
 
     let acc = 0;
     let lastT = performance.now();
     let lastUi = 0;
     let lastSave = performance.now();
     let saveStamp = "";
+    const writeSave = () => {
+      if (!enteredRef.current) return;
+      try {
+        const payload = JSON.stringify({ ...city.toJSON(), name: nameRef.current });
+        if (payload !== saveStamp) {
+          saveStamp = payload;
+          localStorage.setItem(SAVE_KEY, payload);
+        }
+      } catch {
+        /* storage full */
+      }
+    };
     let raf = 0;
     const loop = (now: number) => {
       const dt = Math.min(0.05, (now - lastT) / 1000);
@@ -511,15 +523,7 @@ export function CityApp() {
       }
       if (enteredRef.current && now - lastSave > 12000) {
         lastSave = now;
-        const stamp = `${city.cash}|${city.month}|${city.tiles.filter((t) => t.road || t.zone !== "none" || t.plop !== "none").length}`;
-        if (stamp !== saveStamp) {
-          saveStamp = stamp;
-          try {
-            localStorage.setItem(SAVE_KEY, JSON.stringify({ ...city.toJSON(), name: nameRef.current }));
-          } catch {
-            /* storage full */
-          }
-        }
+        writeSave();
       }
       raf = requestAnimationFrame(loop);
     };
@@ -576,12 +580,15 @@ export function CityApp() {
     };
 
     return () => {
+      writeSave();
       cancelAnimationFrame(raf);
       ro.disconnect();
       canvas.removeEventListener("pointerdown", onDown);
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerup", onUp);
       canvas.removeEventListener("pointercancel", onUp);
+      canvas.removeEventListener("contextmenu", onMenu);
+      canvas.removeEventListener("wheel", onWheel);
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
       window.removeEventListener("blur", blur);
@@ -1152,12 +1159,13 @@ export function CityApp() {
             </label>
           ))}
           <label className="tax">
-            <span>Tariff</span>
+            <span>Import duty</span>
             <input
               type="range"
               min={0}
               max={20}
               value={snap.taxes.tariff}
+              aria-label="Import duty"
               onChange={(e) => {
                 city.setTax({ tariff: Number(e.target.value) });
                 setTick((n) => n + 1);
@@ -1165,6 +1173,7 @@ export function CityApp() {
             />
             <b className="mono">{snap.taxes.tariff}%</b>
           </label>
+          <p className="muted sheet-note">Charged on goods the city buys in, not on what it sells.</p>
           <p className="muted sheet-note">Laws</p>
           {(
             [
