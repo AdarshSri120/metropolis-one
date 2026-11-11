@@ -279,7 +279,7 @@ export class CityScene implements CityView {
           const kind = t.roadKind;
           const span = kind === 2 ? 3.92 : kind === 1 ? 3.7 : 3.28;
           const hot = t.traffic;
-          let col = hot > 0.62 ? lerpHex(HEX.road, HEX.roadHot, Math.min(1, (hot - 0.5) * 2)) : kind === 2 ? 0x2c343c : HEX.road;
+          const col = hot > 0.62 ? lerpHex(HEX.road, HEX.roadHot, Math.min(1, (hot - 0.5) * 2)) : kind === 2 ? 0x2c343c : HEX.road;
           const left = roadAt(city, x - 1, z);
           const right = roadAt(city, x + 1, z);
           const north = roadAt(city, x, z - 1);

@@ -23,10 +23,13 @@ Checked against this city, not the older NEXT build. Numbers are from the runnin
 | One-way on an east–west street | The first paint only chose an axis. Cars could still drive back the other way. | East, then west, then south, then north. A car on an eastbound road never steps west. The same rule holds for the other three directions. |
 | Older city file | A north–south one-way was stored as the number 2. | That old file loads as southbound, not westbound. A new file keeps west as west. |
 | Traffic score on the sample city | 100 on the first look, because the score used last month’s cars. | 96 immediately. After four months, 94. A signal does not move it. |
-| Autosave | Only treasury, month, and how many tiles were built. A tax, a fare, a district, or a one-way could sit unsaved. | The whole city file is compared, including the name. It writes about every 12 seconds, and again when the 3D view or the lot plan is swapped. |
+| Autosave | Only treasury, month, and how many tiles were built. A tax, a fare, a district, or a one-way could sit unsaved. | The whole city file is compared, including the name and a revision that bumps whenever the simulation runs. It writes about every 12 seconds, and again when the 3D view or the lot plan is swapped. A failed write does not count as saved. |
 | ₹0 fare and 0% duty | A free fare came back as ₹8. A 0% duty came back as 4%. | Both stay at zero. |
 | Scroll zoom | Each switch between the lot plan and 3D left the old scroll listener in place. | One scroll listener and one right-click listener after Lots, 3D, Lots. |
 | Import duty | The duty was added to export sales. | Export sales stay `goods sold × 1.8`. The slider is an import duty: `goods bought in × duty`. |
+| Monthly treasury | The balance was copied before that month's income was added, so the number on screen lagged by one month. | After the month turns, the treasury matches the cash in the save, including the balance that just posted. |
+| Failed save | The game marked the city as stored before the phone accepted it. A full storage then never retried, and no message appeared. | The save counts only after storage succeeds. If it fails, the city stays unsaved and a message tells you to export a backup. |
+| Damaged file | A city file with the right length but empty tiles wiped the city you were playing. | That file is refused. The city on screen stays. An older grid file still loads, including a 0% tariff and a road on the river. |
 
 One-way is a painted direction, not a free-angle road, and not one car per person. The arrow on the road points the only way traffic may go. A corner is allowed. The reverse is not.
 

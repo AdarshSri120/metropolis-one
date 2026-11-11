@@ -50,6 +50,7 @@ import { Area, AreaChart, ResponsiveContainer } from "recharts";
 import {
   CATS,
   City,
+  commitCitySave,
   DISTRICTS,
   H,
   PLACES,
@@ -128,8 +129,8 @@ declare global {
 }
 
 function line(x0: number, z0: number, x1: number, z1: number, visit: (x: number, z: number) => void) {
-  let dx = Math.abs(x1 - x0);
-  let dz = Math.abs(z1 - z0);
+  const dx = Math.abs(x1 - x0);
+  const dz = Math.abs(z1 - z0);
   const sx = x0 < x1 ? 1 : -1;
   const sz = z0 < z1 ? 1 : -1;
   let err = dx - dz;
@@ -253,6 +254,8 @@ export function CityApp() {
   const handRef = useRef(false);
   const nameRef = useRef("Riverside");
   const enteredRef = useRef(false);
+  const saveStampRef = useRef("");
+  const saveWarned = useRef(false);
 
   const [entered, setEntered] = useState(false);
   const [source, setSource] = useState<"save" | "sample">("sample");
@@ -481,18 +484,28 @@ export function CityApp() {
     let lastT = performance.now();
     let lastUi = 0;
     let lastSave = performance.now();
-    let saveStamp = "";
     const writeSave = () => {
       if (!enteredRef.current) return;
+      let payload = "";
       try {
-        const payload = JSON.stringify({ ...city.toJSON(), name: nameRef.current });
-        if (payload !== saveStamp) {
-          saveStamp = payload;
-          localStorage.setItem(SAVE_KEY, payload);
-        }
+        payload = JSON.stringify({ ...city.toJSON(), name: nameRef.current });
       } catch {
-        /* storage full */
+        if (!saveWarned.current) {
+          saveWarned.current = true;
+          setToast("Couldn't save on this phone. Export a backup before you leave.");
+        }
+        return;
       }
+      const result = commitCitySave(localStorage, SAVE_KEY, payload, saveStampRef.current);
+      saveStampRef.current = result.stamp;
+      if (result.error) {
+        if (!saveWarned.current) {
+          saveWarned.current = true;
+          setToast(result.error);
+        }
+        return;
+      }
+      saveWarned.current = false;
     };
     let raf = 0;
     const loop = (now: number) => {
@@ -673,13 +686,23 @@ export function CityApp() {
   };
 
   const saveNow = () => {
+    let payload = "";
     try {
-      localStorage.setItem(SAVE_KEY, JSON.stringify({ ...city.toJSON(), name: nameRef.current }));
-      setSource("save");
-      setToast("City saved on this device.");
+      payload = JSON.stringify({ ...city.toJSON(), name: nameRef.current });
     } catch {
-      setToast("Couldn't save. Export a backup instead.");
+      setToast("Couldn't save on this phone. Export a backup before you leave.");
+      return;
     }
+    const result = commitCitySave(localStorage, SAVE_KEY, payload, "\0");
+    if (result.error) {
+      saveWarned.current = true;
+      setToast(result.error);
+      return;
+    }
+    saveStampRef.current = result.stamp;
+    saveWarned.current = false;
+    setSource("save");
+    setToast("City saved on this device.");
   };
 
   const exportCity = () => {

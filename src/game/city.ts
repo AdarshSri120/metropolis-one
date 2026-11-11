@@ -557,6 +557,7 @@ export class City {
   tiles: Tile[];
   cash = 850000;
   month = 10;
+  revision = 0;
   sandbox = false;
   speed = 1;
   paused = false;
@@ -1036,6 +1037,8 @@ export class City {
       this.cash += this.snap.income;
       if (this.cash < -250000) this.cash = -250000;
     }
+    this.snap.cash = Math.round(finite(this.cash, 0));
+    this.revision++;
     this.history.push({
       month: this.month,
       gdp: this.snap.gdp,
@@ -1405,9 +1408,9 @@ export class City {
     let r = housingGap * 1.6 + (happy - 62) * 0.35 - (this.taxes.r - 9) * 2.5 + (parks - 40) * 0.05;
     if (pop < 500) r += 16;
     r -= avgPol * 12;
-    let c = ((pop / 95) - comB) * 2.4 - (this.taxes.c - 10) * 2.1 + (employed > 150 ? 6 : -4);
-    let ind = (comB * 0.85 + 1 - indB) * 2.2 + (unemployment > 8 ? 8 : 0) - (this.taxes.i - 8) * 2;
-    let o = (pop > 2800 ? 12 : -6) + (school > 50 ? 10 : -4) - offB * 0.9 - (this.taxes.o - 10) * 2;
+    const c = ((pop / 95) - comB) * 2.4 - (this.taxes.c - 10) * 2.1 + (employed > 150 ? 6 : -4);
+    const ind = (comB * 0.85 + 1 - indB) * 2.2 + (unemployment > 8 ? 8 : 0) - (this.taxes.i - 8) * 2;
+    const o = (pop > 2800 ? 12 : -6) + (school > 50 ? 10 : -4) - offB * 0.9 - (this.taxes.o - 10) * 2;
     const demand = {
       r: Math.round(clamp(r, -50, 50)),
       c: Math.round(clamp(c, -50, 50)),
@@ -1627,6 +1630,7 @@ export class City {
     this.rebuildPaths();
     this.hasPort = this.tiles.some((t) => t.plop === "port");
     this.hasMarina = this.tiles.some((t) => t.plop === "marina" || t.plop === "ferry");
+    this.revision++;
   }
 
   private commute(powerPct: number) {
@@ -2100,6 +2104,7 @@ export class City {
   toJSON() {
     return {
       version: 10,
+      revision: this.revision,
       month: this.month,
       cash: this.cash,
       sandbox: this.sandbox,
@@ -2170,7 +2175,40 @@ export class City {
   fromJSON(data: unknown): string | null {
     if (!data || typeof data !== "object") return "That file is not a city";
     const obj = data as Record<string, unknown>;
+    const modern =
+      (obj.version === 7 || obj.version === 8 || obj.version === 9 || obj.version === 10) &&
+      Array.isArray(obj.tiles) &&
+      obj.tiles.length === W * H;
+    const legacy = Array.isArray(obj.grid);
+    if (!modern && !legacy) return "Unrecognized city file";
+    if (modern && (obj.tiles as unknown[]).some((row) => !Array.isArray(row))) {
+      return "That city file is damaged. Your current city was kept.";
+    }
+    if (legacy) {
+      const grid = obj.grid as unknown[];
+      if (!grid.length || !grid.every((row) => Array.isArray(row))) return "Unrecognized city file";
+    }
+    const backup = this.toJSON();
+    try {
+      const err = modern ? this.loadModern(obj) : this.loadLegacy(obj);
+      if (err) throw new Error(err);
+      if (!Number.isFinite(this.cash) || !Number.isFinite(this.laws.fare) || !Number.isFinite(this.taxes.tariff) || !Number.isFinite(this.snap.cash)) {
+        throw new Error("non-finite");
+      }
+      return null;
+    } catch {
+      try {
+        this.loadModern(backup as unknown as Record<string, unknown>);
+      } catch {
+        this.blank();
+      }
+      return "That city file is damaged. Your current city was kept.";
+    }
+  }
+
+  private loadModern(obj: Record<string, unknown>): string | null {
     if ((obj.version === 7 || obj.version === 8 || obj.version === 9 || obj.version === 10) && Array.isArray(obj.tiles) && obj.tiles.length === W * H) {
+      const keptRevision = finite(obj.revision, this.revision, 0, 1e12);
       this.blank();
       this.loadDump(obj.tiles as unknown[]);
       if (obj.version !== 10) {
@@ -2234,10 +2272,10 @@ export class City {
       this.redoStack = [];
       this.recompute(false);
       this.snap.history = this.history;
+      this.revision = keptRevision;
       this.dirtyVisual = true;
       return null;
     }
-    if (Array.isArray(obj.grid)) return this.loadLegacy(obj);
     return "Unrecognized city file";
   }
 
@@ -2252,13 +2290,17 @@ export class City {
         const t = this.tile(x, z);
         const type = String(cell.type || "grass");
         const level = clamp(Number(cell.level) || 1, 1, 5);
+        const onRiver = x >= WATER_X;
         if (type === "water") {
           t.ground = 1;
           continue;
         }
-        if (x >= WATER_X) continue;
-        t.ground = 0;
-        if (type === "road" || type === "bus") t.road = true;
+        if (onRiver && type !== "road" && type !== "bus" && type !== "port" && type !== "marina" && type !== "ferry") continue;
+        if (!onRiver) t.ground = 0;
+        if (type === "road" || type === "bus") {
+          t.road = true;
+          if (onRiver) t.ground = 1;
+        }
         if (type === "bus") t.plop = "bus";
         if (type === "rail" || type === "station") t.track = "rail";
         if (type === "station") t.plop = "station";
@@ -2310,21 +2352,38 @@ export class City {
         }
       }
     }
-    if (Number.isFinite(Number(obj.cash))) this.cash = Number(obj.cash);
-    if (Number.isFinite(Number(obj.month))) this.month = Number(obj.month);
+    this.cash = finite(obj.cash, this.cash, -250000, 1e12);
+    this.month = finite(obj.month, this.month, 0, 5000);
     if (obj.mode === "sandbox") this.sandbox = true;
     const ops = obj.operationsV4 as { policy?: { incomeTax?: number; businessTax?: number; tariff?: number } } | undefined;
     if (ops?.policy) {
-      this.taxes.r = ops.policy.incomeTax ?? this.taxes.r;
-      this.taxes.c = ops.policy.businessTax ?? this.taxes.c;
-      this.taxes.i = ops.policy.businessTax ?? this.taxes.i;
-      this.taxes.tariff = ops.policy.tariff ?? this.taxes.tariff;
+      const policy = ops.policy;
+      this.taxes.r = finite(policy.incomeTax, this.taxes.r, 1, 25);
+      this.taxes.c = finite(policy.businessTax, this.taxes.c, 1, 25);
+      this.taxes.i = finite(policy.businessTax, this.taxes.i, 1, 25);
+      this.taxes.tariff = finite(policy.tariff, this.taxes.tariff, 0, 20);
     }
     this.pathStamp = "";
     this.recompute(false);
+    this.revision = finite(obj.revision, 0, 0, 1e12);
     this.dirtyVisual = true;
     return null;
   }
+}
+
+export function commitCitySave(
+  storage: { setItem(key: string, value: string): void },
+  key: string,
+  payload: string,
+  previous: string,
+): { stamp: string; error: string | null } {
+  if (payload === previous) return { stamp: previous, error: null };
+  try {
+    storage.setItem(key, payload);
+  } catch {
+    return { stamp: previous, error: "Couldn't save on this phone. Export a backup before you leave." };
+  }
+  return { stamp: payload, error: null };
 }
 
 function collectCoords(node: unknown, out: [number, number][]) {

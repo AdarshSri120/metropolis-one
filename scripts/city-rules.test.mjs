@@ -8,6 +8,8 @@ const root = "/workspace";
 let vite;
 let City;
 let W;
+let H;
+let commitCitySave;
 
 test.before(async () => {
   vite = await createServer({
@@ -19,6 +21,8 @@ test.before(async () => {
   const mod = await vite.ssrLoadModule("/src/game/city.ts");
   City = mod.City;
   W = mod.W;
+  H = mod.H;
+  commitCitySave = mod.commitCitySave;
 });
 
 test.after(async () => {
@@ -256,7 +260,8 @@ test("the sample city still spans the river", () => {
 
 test("autosave watches the whole city file, not just cash and month", () => {
   const app = readFileSync(`${root}/src/components/city-app.tsx`, "utf8");
-  assert.match(app, /const payload = JSON\.stringify\(\{ \.\.\.city\.toJSON\(\), name: nameRef\.current \}\)/);
+  assert.match(app, /commitCitySave\(localStorage, SAVE_KEY, payload, saveStampRef\.current\)/);
+  assert.equal(app.includes("saveStamp = payload"), false);
   assert.equal(app.includes("${city.cash}|${city.month}|"), false);
   assert.match(app, /canvas\.removeEventListener\("wheel", onWheel\)/);
   assert.match(app, /canvas\.removeEventListener\("contextmenu", onMenu\)/);
@@ -275,4 +280,116 @@ test("autosave watches the whole city file, not just cash and month", () => {
   const after = JSON.stringify({ ...city.toJSON(), name: "Riverside" });
   assert.equal(oldStamp, still);
   assert.notEqual(before, after);
+});
+
+test("the treasury shown after a month includes that month's balance", () => {
+  const city = new City();
+  city.showcase();
+  const before = city.cash;
+  city.monthTick();
+  assert.notEqual(city.snap.income, 0);
+  assert.equal(city.snap.cash, Math.round(city.cash));
+  assert.equal(city.cash, before + city.snap.income);
+  assert.equal(city.snap.month, 11);
+});
+
+test("a damaged city file does not replace the city you are playing", () => {
+  const city = new City();
+  city.showcase();
+  const pop = city.snap.pop;
+  const cash = city.cash;
+  const broken = city.fromJSON({ version: 10, tiles: Array(W * H).fill(null), cash: 1 });
+  assert.match(broken, /kept/);
+  assert.equal(city.snap.pop, pop);
+  assert.equal(city.cash, cash);
+  const unrecognized = city.fromJSON({ version: 10, tiles: [] });
+  assert.equal(unrecognized, "Unrecognized city file");
+  assert.equal(city.cash, cash);
+  assert.equal(city.fromJSON(null), "That file is not a city");
+  assert.equal(city.snap.pop, pop);
+});
+
+test("an older grid save keeps a zero tariff, a river road, and finite money", () => {
+  const city = new City();
+  city.showcase();
+  const row = Array.from({ length: 38 }, () => ({ type: "grass" }));
+  row[36] = { type: "road" };
+  row[37] = { type: "road" };
+  const err = city.fromJSON({
+    grid: [row, [{ type: "res", level: 2 }, { type: "water" }]],
+    cash: 12345,
+    month: 3,
+    operationsV4: { policy: { incomeTax: 11, businessTax: 7, tariff: 0 } },
+  });
+  assert.equal(err, null);
+  assert.equal(city.cash, 12345);
+  assert.equal(city.month, 3);
+  assert.equal(city.taxes.tariff, 0);
+  assert.equal(city.taxes.r, 11);
+  assert.equal(city.tile(36, 0).road, true);
+  assert.equal(city.tile(37, 0).road, true);
+  assert.equal(city.tile(37, 0).ground, 1);
+  assert.equal(city.tile(0, 1).zone, "r");
+  assert.equal(city.tile(0, 1).level, 2);
+  assert.equal(city.tile(1, 1).ground, 1);
+
+  const poisoned = new City();
+  poisoned.showcase();
+  const kept = poisoned.snap.pop;
+  const bad = poisoned.fromJSON({
+    grid: [[{ type: "road" }]],
+    cash: Number.NaN,
+    month: Number.POSITIVE_INFINITY,
+    operationsV4: { policy: { incomeTax: Number.NaN, tariff: Number.NaN } },
+  });
+  assert.equal(bad, null);
+  assert.equal(Number.isFinite(poisoned.cash), true);
+  assert.equal(Number.isFinite(poisoned.month), true);
+  assert.equal(Number.isFinite(poisoned.taxes.tariff), true);
+  assert.equal(Number.isFinite(poisoned.taxes.r), true);
+  assert.notEqual(poisoned.snap.pop, kept);
+});
+
+test("a failed save stays dirty so the next try can store it", () => {
+  let calls = 0;
+  const first = commitCitySave(
+    {
+      setItem() {
+        calls += 1;
+        throw new Error("QuotaExceededError");
+      },
+    },
+    "metropolis-one-v8",
+    "{\"cash\":0}",
+    "",
+  );
+  assert.equal(calls, 1);
+  assert.equal(first.stamp, "");
+  assert.match(first.error, /Export a backup/);
+  let stored = "";
+  const second = commitCitySave(
+    {
+      setItem(_key, value) {
+        stored = value;
+      },
+    },
+    "metropolis-one-v8",
+    "{\"cash\":0}",
+    first.stamp,
+  );
+  assert.equal(second.error, null);
+  assert.equal(second.stamp, "{\"cash\":0}");
+  assert.equal(stored, "{\"cash\":0}");
+  const skip = commitCitySave(
+    {
+      setItem() {
+        throw new Error("should not write");
+      },
+    },
+    "metropolis-one-v8",
+    second.stamp,
+    second.stamp,
+  );
+  assert.equal(skip.error, null);
+  assert.equal(skip.stamp, second.stamp);
 });
