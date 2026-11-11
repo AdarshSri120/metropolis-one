@@ -345,6 +345,7 @@ export interface Snapshot {
     industrial: number;
     office: number;
     trade: number;
+    exportSales: number;
     roads: number;
     transit: number;
     services: number;
@@ -539,7 +540,7 @@ function emptySnap(): Snapshot {
     milestone: "Hamlet",
     history: [],
     taxes: { r: 9, c: 10, i: 8, o: 10, tariff: 4 },
-    budget: { residential: 0, commercial: 0, industrial: 0, office: 0, trade: 0, roads: 0, transit: 0, services: 0 },
+    budget: { residential: 0, commercial: 0, industrial: 0, office: 0, trade: 0, exportSales: 0, roads: 0, transit: 0, services: 0 },
     notes: ["Lay a road, zone beside it, then touch that road with power and water."],
     quests: [],
     counts: { roads: 0, res: 0, com: 0, ind: 0, off: 0 },
@@ -1460,9 +1461,9 @@ export class City {
     const comTax = comJobs * 3.6 * (this.taxes.c / 10);
     const indTax = indJobs * 3.1 * (this.taxes.i / 8);
     const offTax = offJobs * 4.4 * (this.taxes.o / 10);
-    const exportSales = exports * 1.8;
     const importDuty = imports * (this.taxes.tariff / 100) * 6;
-    const tradeIn = exportSales + importDuty;
+    const exportSales = Math.round(exports * 1.8);
+    const tradeIn = importDuty;
     let railN = 0;
     let metroN = 0;
     let rrtsN = 0;
@@ -1614,6 +1615,7 @@ export class City {
         industrial: Math.round(indTax),
         office: Math.round(offTax),
         trade: Math.round(tradeIn),
+        exportSales,
         roads: Math.round(roadUp),
         transit: Math.round(transitUp),
         services: Math.round(serviceUp),
@@ -2371,19 +2373,49 @@ export class City {
   }
 }
 
+function cityJson(raw: string | null): boolean {
+  if (!raw) return false;
+  try {
+    const data = JSON.parse(raw) as unknown;
+    return !!data && typeof data === "object" && !Array.isArray(data);
+  } catch {
+    return false;
+  }
+}
+
 export function commitCitySave(
-  storage: { setItem(key: string, value: string): void },
+  storage: { getItem(key: string): string | null; setItem(key: string, value: string): void },
   key: string,
+  fallbackKey: string,
   payload: string,
   previous: string,
 ): { stamp: string; error: string | null } {
   if (payload === previous) return { stamp: previous, error: null };
   try {
+    const existing = storage.getItem(key);
+    if (cityJson(existing) && existing !== payload) storage.setItem(fallbackKey, existing as string);
     storage.setItem(key, payload);
   } catch {
     return { stamp: previous, error: "Couldn't save on this phone. Export a backup before you leave." };
   }
   return { stamp: payload, error: null };
+}
+
+export function restoreCitySave(city: City, storage: { getItem(key: string): string | null }, keys: string[]): string | null {
+  for (const key of keys) {
+    const raw = storage.getItem(key);
+    if (!raw) continue;
+    let data: unknown;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (city.fromJSON(data)) continue;
+    const name = data && typeof data === "object" ? (data as { name?: unknown }).name : "";
+    return typeof name === "string" && name.trim() ? name.trim().slice(0, 32) : "Riverside";
+  }
+  return null;
 }
 
 function collectCoords(node: unknown, out: [number, number][]) {

@@ -10,6 +10,7 @@ let City;
 let W;
 let H;
 let commitCitySave;
+let restoreCitySave;
 
 test.before(async () => {
   vite = await createServer({
@@ -23,6 +24,7 @@ test.before(async () => {
   W = mod.W;
   H = mod.H;
   commitCitySave = mod.commitCitySave;
+  restoreCitySave = mod.restoreCitySave;
 });
 
 test.after(async () => {
@@ -199,6 +201,7 @@ test("the duty is charged on imports and leaves export sales alone", () => {
   buying.tile(4, 7).level = 3;
   buying.recompute(false);
   assert.equal(buying.snap.exports, 0);
+  assert.equal(buying.snap.budget.exportSales, 0);
   assert.ok(buying.snap.imports > 0);
   buying.setTax({ tariff: 0 });
   const trade0 = buying.snap.budget.trade;
@@ -224,12 +227,18 @@ test("the duty is charged on imports and leaves export sales alone", () => {
   assert.ok(selling.snap.exports > 0, "a port should ship the surplus");
   assert.equal(selling.snap.imports, 0);
   selling.setTax({ tariff: 0 });
-  const sold = selling.snap.budget.trade;
+  assert.equal(selling.snap.budget.trade, 0);
+  const sales = selling.snap.budget.exportSales;
+  assert.equal(sales, Math.round(selling.snap.exports * 1.8));
+  assert.ok(sales > 0);
+  const incomeAt0 = selling.snap.income;
   const exported = selling.snap.exports;
   selling.setTax({ tariff: 20 });
   assert.equal(selling.snap.exports, exported);
   assert.equal(selling.snap.imports, 0);
-  assert.equal(selling.snap.budget.trade, sold);
+  assert.equal(selling.snap.budget.trade, 0);
+  assert.equal(selling.snap.budget.exportSales, sales);
+  assert.equal(selling.snap.income, incomeAt0);
 });
 
 test("an empty map still has no phantom output, and a lone plant does not cover the city", () => {
@@ -260,7 +269,7 @@ test("the sample city still spans the river", () => {
 
 test("autosave watches the whole city file, not just cash and month", () => {
   const app = readFileSync(`${root}/src/components/city-app.tsx`, "utf8");
-  assert.match(app, /commitCitySave\(localStorage, SAVE_KEY, payload, saveStampRef\.current\)/);
+  assert.match(app, /commitCitySave\(localStorage, SAVE_KEY, SAVE_FALLBACK, payload, saveStampRef\.current\)/);
   assert.equal(app.includes("saveStamp = payload"), false);
   assert.equal(app.includes("${city.cash}|${city.month}|"), false);
   assert.match(app, /canvas\.removeEventListener\("wheel", onWheel\)/);
@@ -350,46 +359,136 @@ test("an older grid save keeps a zero tariff, a river road, and finite money", (
   assert.notEqual(poisoned.snap.pop, kept);
 });
 
-test("a failed save stays dirty so the next try can store it", () => {
-  let calls = 0;
-  const first = commitCitySave(
-    {
-      setItem() {
-        calls += 1;
-        throw new Error("QuotaExceededError");
-      },
+test("one-way directions 0 through 4 survive a save and a load", () => {
+  const src = readFileSync(`${root}/src/game/city.ts`, "utf8");
+  assert.match(src, /export type OneWay = 0 \| 1 \| 2 \| 3 \| 4;/);
+  for (const way of [0, 1, 2, 3, 4]) {
+    const city = new City();
+    city.blank();
+    city.tile(0, 0).road = true;
+    city.tile(0, 0).oneWay = way;
+    const data = city.toJSON();
+    assert.equal(data.version, 10);
+    assert.equal(data.tiles[0][8], way);
+    const next = new City();
+    next.showcase();
+    assert.equal(next.fromJSON(data), null);
+    assert.equal(next.tile(0, 0).road, true);
+    assert.equal(next.tile(0, 0).oneWay, way);
+    assert.equal(next.toJSON().tiles[0][8], way);
+  }
+});
+
+function memStore(initial = {}) {
+  const box = { ...initial };
+  const api = {
+    fail: new Set(),
+    box,
+    getItem(key) {
+      return Object.prototype.hasOwnProperty.call(box, key) ? box[key] : null;
     },
-    "metropolis-one-v8",
-    "{\"cash\":0}",
-    "",
-  );
-  assert.equal(calls, 1);
+    setItem(key, value) {
+      if (api.fail.has(key)) throw new Error("QuotaExceededError");
+      box[key] = value;
+    },
+  };
+  return api;
+}
+
+test("a failed save stays dirty so the next try can store it", () => {
+  const store = memStore();
+  store.fail.add("metropolis-one-v8");
+  const first = commitCitySave(store, "metropolis-one-v8", "metropolis-one-v7", "{\"cash\":0}", "");
   assert.equal(first.stamp, "");
   assert.match(first.error, /Export a backup/);
-  let stored = "";
-  const second = commitCitySave(
-    {
-      setItem(_key, value) {
-        stored = value;
-      },
-    },
-    "metropolis-one-v8",
-    "{\"cash\":0}",
-    first.stamp,
-  );
+  assert.equal(store.box["metropolis-one-v8"], undefined);
+
+  store.fail.clear();
+  const second = commitCitySave(store, "metropolis-one-v8", "metropolis-one-v7", "{\"cash\":0}", first.stamp);
   assert.equal(second.error, null);
   assert.equal(second.stamp, "{\"cash\":0}");
-  assert.equal(stored, "{\"cash\":0}");
-  const skip = commitCitySave(
-    {
-      setItem() {
-        throw new Error("should not write");
-      },
-    },
-    "metropolis-one-v8",
-    second.stamp,
-    second.stamp,
-  );
+  assert.equal(store.box["metropolis-one-v8"], "{\"cash\":0}");
+
+  const skip = commitCitySave(store, "metropolis-one-v8", "metropolis-one-v7", second.stamp, second.stamp);
   assert.equal(skip.error, null);
   assert.equal(skip.stamp, second.stamp);
+  assert.equal(store.box["metropolis-one-v8"], "{\"cash\":0}");
+});
+
+test("a new save keeps the previous city, and a bad file is not copied over it", () => {
+  const store = memStore({ "metropolis-one-v8": "{\"fare\":0}" });
+  store.fail.add("metropolis-one-v8");
+  const blocked = commitCitySave(store, "metropolis-one-v8", "metropolis-one-v7", "{\"fare\":1}", "");
+  assert.equal(blocked.stamp, "");
+  assert.match(blocked.error, /Export a backup/);
+  assert.equal(store.box["metropolis-one-v8"], "{\"fare\":0}");
+  assert.equal(store.box["metropolis-one-v7"], "{\"fare\":0}");
+
+  store.fail.clear();
+  const wrote = commitCitySave(store, "metropolis-one-v8", "metropolis-one-v7", "{\"fare\":1}", blocked.stamp);
+  assert.equal(wrote.error, null);
+  assert.equal(wrote.stamp, "{\"fare\":1}");
+  assert.equal(store.box["metropolis-one-v8"], "{\"fare\":1}");
+  assert.equal(store.box["metropolis-one-v7"], "{\"fare\":0}");
+
+  const full = memStore({ "metropolis-one-v8": "{\"fare\":0}", "metropolis-one-v7": "{\"older\":1}" });
+  full.fail.add("metropolis-one-v7");
+  const held = commitCitySave(full, "metropolis-one-v8", "metropolis-one-v7", "{\"fare\":1}", "");
+  assert.equal(held.stamp, "");
+  assert.match(held.error, /Export a backup/);
+  assert.equal(full.box["metropolis-one-v8"], "{\"fare\":0}");
+  assert.equal(full.box["metropolis-one-v7"], "{\"older\":1}");
+
+  const rotten = memStore({
+    "metropolis-one-v8": "{broken",
+    "metropolis-one-v7": "{\"fare\":0}",
+  });
+  const replaced = commitCitySave(rotten, "metropolis-one-v8", "metropolis-one-v7", "{\"fare\":1}", "");
+  assert.equal(replaced.error, null);
+  assert.equal(rotten.box["metropolis-one-v8"], "{\"fare\":1}");
+  assert.equal(rotten.box["metropolis-one-v7"], "{\"fare\":0}");
+});
+
+test("a corrupt newest save falls back to the previous city", () => {
+  const kept = new City();
+  kept.blank();
+  kept.laws.fare = 0;
+  kept.taxes.tariff = 0;
+  kept.recompute(false);
+  const file = JSON.stringify({ ...kept.toJSON(), name: "  Kept  " });
+  const store = memStore({
+    "metropolis-one-v8": "{broken",
+    "metropolis-one-v7": file,
+  });
+  const city = new City();
+  city.showcase();
+  const sample = city.snap.pop;
+  assert.ok(sample > 2000);
+  const name = restoreCitySave(city, store, ["metropolis-one-v8", "metropolis-one-v7"]);
+  assert.equal(name, "Kept");
+  assert.equal(city.laws.fare, 0);
+  assert.equal(city.taxes.tariff, 0);
+  assert.notEqual(city.snap.pop, sample);
+  assert.ok(city.snap.pop < 100);
+
+  const newer = new City();
+  newer.blank();
+  newer.laws.fare = 3;
+  const older = new City();
+  older.blank();
+  older.laws.fare = 9;
+  const both = memStore({
+    a: JSON.stringify({ ...newer.toJSON(), name: "Newer" }),
+    b: JSON.stringify({ ...older.toJSON(), name: "Older" }),
+  });
+  const live = new City();
+  live.showcase();
+  assert.equal(restoreCitySave(live, both, ["a", "b"]), "Newer");
+  assert.equal(live.laws.fare, 3);
+
+  const none = new City();
+  none.showcase();
+  const pop = none.snap.pop;
+  assert.equal(restoreCitySave(none, memStore({ a: "{broken", b: "not json" }), ["a", "b"]), null);
+  assert.equal(none.snap.pop, pop);
 });

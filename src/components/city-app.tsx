@@ -60,6 +60,7 @@ import {
   W,
   compact,
   indianCityName,
+  restoreCitySave,
   rupee,
   type Brush,
   type CatId,
@@ -226,17 +227,7 @@ function roadCostLine(brush: Brush) {
 }
 
 function loadSave(city: City) {
-  try {
-    const raw = localStorage.getItem(SAVE_KEY) ?? localStorage.getItem(SAVE_FALLBACK);
-    if (!raw) return null;
-    const data = JSON.parse(raw) as { name?: string };
-    const err = city.fromJSON(data);
-    if (err) return null;
-    const name = typeof data.name === "string" && data.name.trim() ? data.name.trim().slice(0, 32) : "Riverside";
-    return name;
-  } catch {
-    return null;
-  }
+  return restoreCitySave(city, localStorage, [SAVE_KEY, SAVE_FALLBACK]);
 }
 
 export function CityApp() {
@@ -496,7 +487,7 @@ export function CityApp() {
         }
         return;
       }
-      const result = commitCitySave(localStorage, SAVE_KEY, payload, saveStampRef.current);
+      const result = commitCitySave(localStorage, SAVE_KEY, SAVE_FALLBACK, payload, saveStampRef.current);
       saveStampRef.current = result.stamp;
       if (result.error) {
         if (!saveWarned.current) {
@@ -693,7 +684,7 @@ export function CityApp() {
       setToast("Couldn't save on this phone. Export a backup before you leave.");
       return;
     }
-    const result = commitCitySave(localStorage, SAVE_KEY, payload, "\0");
+    const result = commitCitySave(localStorage, SAVE_KEY, SAVE_FALLBACK, payload, "\0");
     if (result.error) {
       saveWarned.current = true;
       setToast(result.error);
@@ -1320,8 +1311,16 @@ export function CityApp() {
               <b>{compact(snap.exports)}</b>
             </div>
             <div>
+              <span>Export sales</span>
+              <b>{rupee(snap.budget.exportSales)}</b>
+            </div>
+            <div>
               <span>Imports</span>
               <b>{compact(snap.imports)}</b>
+            </div>
+            <div>
+              <span>Import duty</span>
+              <b>{rupee(snap.budget.trade)}</b>
             </div>
             <div>
               <span>Jobs</span>
